@@ -1,0 +1,87 @@
+/* Custom Date Picker Styles to match dark theme */
+
+/* Chrome/Edge date picker calendar */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  filter: invert(0.8) sepia(1) saturate(5) hue-rotate(160deg);
+  opacity: 0.8;
+  transition: opacity 0.3s ease;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+  filter: invert(0.9) sepia(1) saturate(5) hue-rotate(160deg);
+}
+
+/* Date input text styling */
+input[type="date"]::-webkit-datetime-edit {
+  color: #ffffff;
+}
+
+input[type="date"]::-webkit-datetime-edit-fields-wrapper {
+  color: #ffffff;
+}
+
+input[type="date"]::-webkit-datetime-edit-text {
+  color: rgba(255, 255, 255, 0.7);
+  padding: 0 4px;
+}
+
+input[type="date"]::-webkit-datetime-edit-month-field,
+input[type="date"]::-webkit-datetime-edit-day-field,
+input[type="date"]::-webkit-datetime-edit-year-field {
+  color: #ffffff;
+  padding: 2px;
+  border-radius: 3px;
+}
+
+input[type="date"]::-webkit-datetime-edit-month-field:focus,
+input[type="date"]::-webkit-datetime-edit-day-field:focus,
+input[type="date"]::-webkit-datetime-edit-year-field:focus {
+  background: rgba(20, 184, 166, 0.2);
+  color: #14b8a6;
+  outline: none;
+}
+
+input[type="date"]::-webkit-inner-spin-button {
+  display: none;
+}
+
+input[type="date"]::-webkit-clear-button {
+  color: #14b8a6;
+  opacity: 0.8;
+  cursor: pointer;
+}
+
+input[type="date"]::-webkit-clear-button:hover {
+  opacity: 1;
+}
+
+/* Firefox date picker */
+input[type="date"] {
+  color-scheme: dark;
+}
+
+/* For better cross-browser support */
+input[type="date"]::-moz-placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+input[type="date"]::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Calendar popup background (limited browser support) */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2314b8a6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2' ry='2'%3E%3C/rect%3E%3Cline x1='16' y1='2' x2='16' y2='6'%3E%3C/line%3E%3Cline x1='8' y1='2' x2='8' y2='6'%3E%3C/line%3E%3Cline x1='3' y1='10' x2='21' y2='10'%3E%3C/line%3E%3C/svg%3E");
+  background-size: 16px 16px;
+  background-repeat: no-repeat;
+  background-position: center;
+  width: 20px;
+  height: 20px;
+  padding: 4px;
+  margin-left: 4px;
+}
+
+
+

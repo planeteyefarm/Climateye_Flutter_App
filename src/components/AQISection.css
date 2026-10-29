@@ -1,0 +1,507 @@
+.aqi-section {
+  background: linear-gradient(135deg, rgba(35, 42, 70, 0.95) 0%, rgba(26, 31, 58, 0.9) 100%);
+  border: 1px solid rgba(20, 184, 166, 0.4);
+  border-radius: 20px;
+  padding: 40px;
+  margin-bottom: 0;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(20, 184, 166, 0.1);
+  transition: all 0.3s ease;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+
+.aqi-section.clickable {
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.aqi-section.clickable:hover {
+  border-color: rgba(20, 184, 166, 0.8);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(20, 184, 166, 0.3);
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 32px;
+  gap: 20px;
+  flex-wrap: nowrap;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(20, 184, 166, 0.15);
+}
+
+.section-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #ffffff;
+  margin: 0;
+  letter-spacing: 0.5px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.view-details-link {
+  color: #14b8a6;
+  font-size: 0.9rem;
+  font-weight: 600;
+  opacity: 0.8;
+  transition: opacity 0.3s ease;
+}
+
+.aqi-section.clickable:hover .view-details-link {
+  opacity: 1;
+}
+
+.header-right {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+.aqi-category-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  flex-shrink: 0;
+  width: auto;
+  height: auto;
+  min-width: 200px;
+  min-height: 200px;
+  max-width: 250px;
+  max-height: 250px;
+}
+
+.aqi-category-image img {
+  width: 100%;
+  height: 100%;
+  min-width: 200px;
+  min-height: 200px;
+  max-width: 250px;
+  max-height: 250px;
+  object-fit: contain;
+  display: block;
+  visibility: visible;
+}
+
+.aqi-content {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.aqi-main-display {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+
+.aqi-value-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.aqi-value {
+  font-size: 64px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -1px;
+  display: inline-block;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.aqi-label {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-top: 4px;
+  letter-spacing: 1px;
+}
+
+.aqi-status-box {
+  padding: 16px 24px;
+  border-radius: 12px;
+  border: 2px solid;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  box-shadow: 0 0 10px 0 rgb(2, 255, 225);
+  animation: breathing 1.5s ease-in-out infinite;
+}
+
+@keyframes breathing {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+    
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.95;
+  }
+}
+
+.pollutant-levels {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.pollutant-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: rgba(20, 25, 50, 0.6);
+  border-radius: 8px;
+  border: 1px solid rgba(20, 184, 166, 0.3);
+}
+
+.pollutant-label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.pollutant-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #14b8a6;
+}
+
+.aqi-scale {
+  position: relative;
+  margin-top: 8px;
+}
+
+.scale-bar {
+  display: flex;
+  height: 60px;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.scale-segment {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 4px;
+  position: relative;
+}
+
+.scale-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #ffffff;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.scale-range {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.scale-indicator {
+  position: absolute;
+  top: -8px;
+  transform: translateX(-50%);
+  z-index: 10;
+}
+
+.indicator-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 3px solid #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.last-updated {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(20, 184, 166, 0.2);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+}
+
+.loading-state {
+  padding: 60px 40px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.loading-state p {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 16px;
+  margin: 0;
+  font-weight: 500;
+}
+
+.loading-subtext {
+  color: rgba(255, 255, 255, 0.5) !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid rgba(20, 184, 166, 0.2);
+  border-top-color: #14b8a6;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Laptop Large (1601px+) */
+@media (min-width: 1601px) {
+  .aqi-section {
+    padding: 48px;
+  }
+
+  .aqi-value {
+    font-size: 96px;
+  }
+}
+
+/* Laptop Medium (1441px - 1600px) */
+@media (min-width: 1441px) and (max-width: 1600px) {
+  .aqi-section {
+    padding: 40px;
+  }
+
+  .aqi-value {
+    font-size: 90px;
+  }
+}
+
+/* Laptop Small (1281px - 1440px) */
+@media (min-width: 1281px) and (max-width: 1440px) {
+  .aqi-section {
+    padding: 36px;
+  }
+
+  .aqi-value {
+    font-size: 88px;
+  }
+}
+
+/* Tablet Large (1025px - 1280px) */
+@media (min-width: 1025px) and (max-width: 1280px) {
+  .aqi-section {
+    padding: 32px;
+  }
+
+  .aqi-value {
+    font-size: 84px;
+  }
+
+  .section-title {
+    font-size: 22px;
+  }
+}
+
+/* Tablet Medium (901px - 1024px) */
+@media (min-width: 901px) and (max-width: 1024px) {
+  .aqi-section {
+    padding: 28px;
+  }
+
+  .aqi-value {
+    font-size: 80px;
+  }
+
+  .section-title {
+    font-size: 22px;
+  }
+
+  .pollutant-levels {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Tablet Small (769px - 900px) */
+@media (min-width: 769px) and (max-width: 900px) {
+  .aqi-section {
+    padding: 24px;
+  }
+
+  .aqi-value {
+    font-size: 72px;
+  }
+
+  .section-title {
+    font-size: 20px;
+  }
+
+  .pollutant-levels {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Mobile Large (481px - 768px) */
+@media (min-width: 481px) and (max-width: 768px) {
+  .aqi-section {
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .section-title {
+    font-size: 20px;
+  }
+
+  .aqi-main-display {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .aqi-value {
+    font-size: 64px;
+    min-height: 64px;
+  }
+
+  .aqi-label {
+    font-size: 12px;
+  }
+
+  .aqi-status-box {
+    width: 100%;
+    padding: 12px 20px;
+    font-size: 16px;
+  }
+
+  .pollutant-levels {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .pollutant-item {
+    padding: 10px;
+  }
+
+  .pollutant-label {
+    font-size: 12px;
+  }
+
+  .pollutant-value {
+    font-size: 18px;
+  }
+
+  .aqi-category-image {
+    min-width: 150px;
+    min-height: 150px;
+    max-width: 180px;
+    max-height: 180px;
+  }
+
+  .aqi-category-image img {
+    min-width: 150px;
+    min-height: 150px;
+    max-width: 180px;
+    max-height: 180px;
+  }
+
+  .scale-bar {
+    height: 50px;
+  }
+
+  .scale-label {
+    font-size: 9px;
+  }
+
+  .scale-range {
+    font-size: 8px;
+  }
+}
+
+/* Mobile Medium (361px - 480px) */
+@media (min-width: 361px) and (max-width: 480px) {
+  .aqi-section {
+    padding: 18px;
+  }
+
+  .aqi-value {
+    font-size: 60px;
+    min-height: 60px;
+  }
+
+  .section-title {
+    font-size: 18px;
+  }
+
+  .pollutant-levels {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .aqi-category-image {
+    min-width: 140px;
+    min-height: 140px;
+    max-width: 170px;
+    max-height: 170px;
+  }
+}
+
+/* Mobile Small (up to 360px) */
+@media (max-width: 360px) {
+  .aqi-section {
+    padding: 16px;
+  }
+
+  .aqi-value {
+    font-size: 56px;
+    min-height: 56px;
+  }
+
+  .section-title {
+    font-size: 17px;
+  }
+
+  .pollutant-levels {
+    grid-template-columns: 1fr;
+  }
+
+  .aqi-category-image {
+    min-width: 120px;
+    min-height: 120px;
+    max-width: 150px;
+    max-height: 150px;
+  }
+}
+

@@ -1,17 +1,44 @@
-# climateeye
+# ClimateEye
 
-A new Flutter project.
+This repository contains **both**:
 
-## Getting Started
+1. **Flutter app** (`lib/`, `android/`, `ios/`, `web/`, …) — ClimateEye mobile/web client  
+2. **Web dashboard** (`src/`, `package.json`, `public/`, …) — SKY EYE environmental monitoring frontend
 
-This project is a starting point for a Flutter application.
+---
 
-A few resources to get you started if this is your first Flutter project:
+## Flutter app
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+flutter pub get
+flutter run -d chrome
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+See [Flutter docs](https://docs.flutter.dev/) for setup help.
+
+---
+
+## Web dashboard (Vite)
+
+A modern environmental monitoring dashboard with dark theme and teal accents.
+
+### Features
+
+- Login system with admin credentials
+- Date range selector (default: one week before today → today)
+- Dark theme with teal accents
+- Responsive UI
+
+### Install & run
+
+```bash
+npm install
+npm run dev
+```
+
+App: `http://localhost:3000`
+
+### Notes
+
+- India construction tiles are hosted on R2; see `docs/construction-tiles.md`
+- Backend APIs are configured per environment (see `.env.example`)

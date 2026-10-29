@@ -1,0 +1,2260 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react'
+import { transformRecordsByHeight } from '../utils/dataTransformers'
+import { useAuth } from '../context/AuthContext'
+import { useNavigate, useLocation } from 'react-router-dom'
+import { format, subDays, startOfDay, isAfter, addDays, isBefore, isEqual, isToday, subHours, parseISO } from 'date-fns'
+import { LineChart, Line, BarChart, Bar, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, Cell, Dot } from 'recharts'
+import MapComponent, { BASEMAPS } from './MapComponent'
+import PlaceSearch from './PlaceSearch'
+import AreaPollutantsPanel from './AreaPollutantsPanel'
+import WeatherSection from './WeatherSection'
+import AQISection from './AQISection'
+import WeatherWorkspace from './WeatherWorkspace'
+import LiveDashboardCards from './LiveDashboardCards'
+import { calculateGeometryCenter, fetchAQIData, fetchWeatherData, fetchHourlyAQIDataRange, fetchHourlyWeatherData, fetchHourlyAQIData, fetchMethaneCatalog, fetchMethanePlumes, fetchMethaneTiles, boundsFromGeometry, resolveMethaneDateRange } from '../services/api'
+import { resolveCityFromCoords } from '../services/aqiInApi'
+import './Dashboard.css'
+import './DatePicker.css'
+import './Building3DView.css'
+
+const Building3DView = lazy(() => import('./Building3DView'))
+
+const Dashboard = () => {
+  const { logout } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const today = startOfDay(new Date())
+  const oneWeekAgo = startOfDay(subDays(today, 7))
+
+  const [startDate, setStartDate] = useState(format(oneWeekAgo, 'yyyy-MM-dd'))
+  const [endDate, setEndDate] = useState(format(today, 'yyyy-MM-dd'))
+  const [viewType, setViewType] = useState('dark')
+  const [basemapMenuOpen, setBasemapMenuOpen] = useState(false)
+  const [layersMenuOpen, setLayersMenuOpen] = useState(false)
+  const layersMenuRef = useRef(null)
+  const [showWind, setShowWind] = useState(false)
+  const [showTemperature, setShowTemperature] = useState(false)
+  const [showRain, setShowRain] = useState(false)
+  const [showAqi, setShowAqi] = useState(false)
+  const [showSensorData, setShowSensorData] = useState(false)
+  const [isDrawing, setIsDrawing] = useState(false)
+  const [drawnGeometry, setDrawnGeometry] = useState(null)
+  const [uploadedKML, setUploadedKML] = useState(null)
+  const [showAnalysis, setShowAnalysis] = useState(false) 
+  const [currentViewDate, setCurrentViewDate] = useState(null) // Currently viewing date
+  const [weatherData, setWeatherData] = useState(null)
+  const [aqiData, setAqiData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [viewMode, setViewMode] = useState('live') // 'live', 'daily', 'weekly', 'monthly'
+  const [aqiChartData, setAqiChartData] = useState([]) // For AQI chart
+  const [loadingChart, setLoadingChart] = useState(false)
+  const [timeChartData, setTimeChartData] = useState([]) // For Time chart
+  const [loadingTimeChart, setLoadingTimeChart] = useState(false)
+  const [liveHourlyChartData, setLiveHourlyChartData] = useState([]) // Per-hour AQI for Live time series bar
+  const [selectedHeight, setSelectedHeight] = useState(null) // '0-3meter' or '3meter-above' or null
+  const [methaneOverlay, setMethaneOverlay] = useState(null)
+  const [methaneLoading, setMethaneLoading] = useState(false)
+  const [methaneError, setMethaneError] = useState(null)
+  const [show3DView, setShow3DView] = useState(false)
+  const [mapView, setMapView] = useState(null)
+  const [locateRequest, setLocateRequest] = useState(0)
+  const [locateState, setLocateState] = useState({ locating: false, active: false, error: null })
+  const [leafletMap, setLeafletMap] = useState(null)
+  const [searchedPlace, setSearchedPlace] = useState(null)
+  const [calendarResolving, setCalendarResolving] = useState(false)
+  /** Top-level product section: AQI tools vs Weather workspace (built in parallel). */
+  const [productSection, setProductSection] = useState('aqi')
+  
+  // Refs to prevent multiple simultaneous API calls
+  const isFetchingRef = useRef(false)
+  const lastFetchKeyRef = useRef(null)
+
+  const handleLocateStateChange = useCallback((next) => {
+    setLocateState(next)
+  }, [])
+
+  const handleMapReady = useCallback((mapInstance) => {
+    setLeafletMap(mapInstance)
+  }, [])
+
+  useEffect(() => {
+    // Update dates daily - recalculate one week ago from today
+    const updateDates = () => {
+      const currentToday = startOfDay(new Date())
+      const currentOneWeekAgo = startOfDay(subDays(currentToday, 7))
+      setStartDate(format(currentOneWeekAgo, 'yyyy-MM-dd'))
+      setEndDate(format(currentToday, 'yyyy-MM-dd'))
+    }
+
+    // Update on mount and set interval to check daily
+    updateDates()
+    const interval = setInterval(updateDates, 60000) // Check every minute
+
+    return () => clearInterval(interval)
+  }, [])
+
+  // Restore AOI when returning from AQI Calendar (Change area / Dashboard)
+  useEffect(() => {
+    if (!location.state?.restoreAoi) return
+
+    const geometry = location.state.geometry
+    const kml = location.state.kml || location.state.uploadedKML
+
+    if (kml?.content) {
+      setUploadedKML({ name: kml.name || 'Uploaded KML', content: kml.content })
+      setDrawnGeometry(null)
+    } else if (geometry?.coordinates) {
+      setDrawnGeometry(geometry)
+      setUploadedKML(null)
+    }
+
+    navigate(location.pathname, { replace: true, state: {} })
+  }, [location.state, navigate])
+
+  // Restore analysis view when navigating back from detail page
+  useEffect(() => {
+    if (location.state?.restoreAnalysis) {
+      // Restore the analysis state
+      if (location.state.geometry) {
+        // If geometry is provided, restore it
+        if (location.state.geometry.type === 'Polygon' || location.state.geometry.type === 'MultiPolygon') {
+          setDrawnGeometry(location.state.geometry)
+        }
+      }
+      if (location.state.startDate) {
+        setStartDate(location.state.startDate)
+      }
+      if (location.state.endDate) {
+        setEndDate(location.state.endDate)
+      }
+      if (location.state.currentDate) {
+        setCurrentViewDate(location.state.currentDate)
+      }
+      // Restore selected height
+      if (location.state.selectedHeight !== undefined) {
+        setSelectedHeight(location.state.selectedHeight)
+      }
+      // Show analysis view
+      setShowAnalysis(true)
+      
+      // Fetch data if we have geometry and date
+      if (location.state.geometry && location.state.currentDate) {
+        const center = calculateGeometryCenter(location.state.geometry)
+        if (center) {
+          fetchDataForDate(center.latitude, center.longitude, location.state.currentDate)
+        }
+      }
+      
+      // Clear the state to prevent re-triggering
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+  }, [location.state, navigate])
+
+  const handleStartDateChange = (e) => {
+    const selectedDate = new Date(e.target.value)
+    const selectedStartOfDay = startOfDay(selectedDate)
+    const currentEndDate = new Date(endDate)
+    
+    // Can't select a date after end date
+    if (isAfter(selectedStartOfDay, currentEndDate)) {
+      return
+    }
+    
+    setStartDate(format(selectedStartOfDay, 'yyyy-MM-dd'))
+  }
+
+  const handleEndDateChange = (e) => {
+    const selectedDate = new Date(e.target.value)
+    const selectedStartOfDay = startOfDay(selectedDate)
+    const currentToday = startOfDay(new Date())
+    const currentStartDate = new Date(startDate)
+    
+    // Can't select a date beyond today
+    if (isAfter(selectedStartOfDay, currentToday)) {
+      return
+    }
+    
+    // Can't select a date before start date
+    if (isAfter(currentStartDate, selectedStartOfDay)) {
+      return
+    }
+    
+    setEndDate(format(selectedStartOfDay, 'yyyy-MM-dd'))
+  }
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login')
+  }
+
+  const handleDrawArea = () => {
+    setShow3DView(false)
+    setIsDrawing(true)
+    setUploadedKML(null) // Clear KML when drawing
+  }
+
+  const handleGeometryComplete = (geometry) => {
+    setDrawnGeometry(geometry)
+    setIsDrawing(false)
+    setShowTemperature(false)
+    setShowRain(false)
+    setShowAqi(true)
+  }
+
+  const handleCancelDrawing = () => {
+    setIsDrawing(false)
+  }
+
+  const handleKMLUpload = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+
+    if (!file.name.toLowerCase().endsWith('.kml') && !file.name.toLowerCase().endsWith('.kmz')) {
+      alert('Please upload a KML or KMZ file')
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      setUploadedKML({
+        name: file.name,
+        content: event.target.result
+      })
+      setDrawnGeometry(null) // Clear drawn geometry when KML is uploaded
+      setIsDrawing(false)
+      setShowTemperature(false)
+      setShowRain(false)
+      setShowAqi(true)
+    }
+    reader.readAsText(file)
+    e.target.value = '' // Reset file input
+  }
+
+  const handleClearGeometry = () => {
+    setDrawnGeometry(null)
+    setUploadedKML(null)
+    setIsDrawing(false)
+    setMethaneOverlay(null)
+    setMethaneError(null)
+    setShow3DView(false)
+    setShowAqi(false)
+  }
+
+  const handleClearMethane = () => {
+    setMethaneOverlay(null)
+    setMethaneError(null)
+  }
+
+  const handleAnalyseMethane = async () => {
+    if (!drawnGeometry && !uploadedKML) {
+      alert('Please draw an area or upload a KML file first')
+      return
+    }
+
+    setMethaneLoading(true)
+    setMethaneError(null)
+
+    try {
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+      if (!geometry) {
+        throw new Error('Could not parse geometry')
+      }
+
+      const bounds = boundsFromGeometry(geometry)
+      const center = calculateGeometryCenter(geometry)
+      if (!bounds && !center) {
+        throw new Error('Could not calculate the selected area')
+      }
+
+      const dates = resolveMethaneDateRange(startDate, endDate)
+      const query = {
+        bounds,
+        latitude: center?.latitude,
+        longitude: center?.longitude,
+        startDate: dates.startDate,
+        endDate: dates.endDate
+      }
+
+      const [catalog, plumes, tiles] = await Promise.all([
+        fetchMethaneCatalog(),
+        fetchMethanePlumes(query),
+        fetchMethaneTiles(query)
+      ])
+
+      setMethaneOverlay({
+        tileUrl: tiles.tile_url || null,
+        features: plumes.geojson?.features || [],
+        legend: tiles.legend || catalog.legend || null,
+        attribution: tiles.attribution || plumes.attribution || catalog.attribution,
+        count: plumes.count ?? tiles.count ?? 0,
+        dateLabel: `${dates.startDate} to ${dates.endDate}`,
+        note: dates.note
+      })
+    } catch (err) {
+      setMethaneOverlay(null)
+      setMethaneError(err.message)
+      alert(`Methane analysis failed: ${err.message}`)
+    } finally {
+      setMethaneLoading(false)
+    }
+  }
+
+  const selectBasemap = (id) => {
+    setViewType(id)
+    setBasemapMenuOpen(false)
+  }
+
+  // Windy-style: one color field at a time (Temp / Rain / AQI); Wind can layer on top
+  const toggleTemperature = () => {
+    setShowTemperature((on) => {
+      if (on) return false
+      setShowRain(false)
+      setShowAqi(false)
+      return true
+    })
+  }
+
+  const toggleRain = () => {
+    setShowRain((on) => {
+      if (on) return false
+      setShowTemperature(false)
+      setShowAqi(false)
+      return true
+    })
+  }
+
+  const toggleAqi = () => {
+    setShowAqi((on) => {
+      if (on) return false
+      setShowTemperature(false)
+      setShowRain(false)
+      return true
+    })
+  }
+
+  const toggleWind = () => {
+    setShowWind((on) => !on)
+  }
+
+  const toggleSensorData = () => {
+    setShowSensorData((on) => !on)
+  }
+
+  const activeLayerCount = [
+    showTemperature,
+    showRain,
+    showWind,
+    showAqi,
+    showSensorData
+  ].filter(Boolean).length
+
+  useEffect(() => {
+    if (!layersMenuOpen) return undefined
+    const onPointerDown = (event) => {
+      if (layersMenuRef.current && !layersMenuRef.current.contains(event.target)) {
+        setLayersMenuOpen(false)
+      }
+    }
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setLayersMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [layersMenuOpen])
+
+  const getMaxDate = () => {
+    return format(today, 'yyyy-MM-dd')
+  }
+
+  // Date navigation functions
+  const handlePreviousDate = async () => {
+    if (!currentViewDate || loading) return
+    
+    const current = new Date(currentViewDate)
+    const prev = subDays(current, 1)
+    const start = new Date(startDate)
+    
+    // Don't go before start date
+    if (isBefore(prev, start) && !isEqual(prev, start)) {
+      return
+    }
+    
+    const newDate = format(prev, 'yyyy-MM-dd')
+    setCurrentViewDate(newDate)
+    
+    // Fetch data for the new date when button is clicked
+    if (showAnalysis && (drawnGeometry || uploadedKML) && viewMode === 'live') {
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+      if (geometry) {
+        const center = calculateGeometryCenter(geometry)
+        if (center) {
+          setLoading(true)
+          try {
+            await fetchDataForDate(center.latitude, center.longitude, newDate)
+          } catch (err) {
+            setError(err.message)
+          } finally {
+            setLoading(false)
+          }
+        }
+      }
+    }
+  }
+
+  const handleNextDate = async () => {
+    if (!currentViewDate || loading) return
+    
+    const current = startOfDay(new Date(currentViewDate))
+    const next = startOfDay(addDays(current, 1))
+    const end = startOfDay(new Date(endDate))
+    const todayDate = startOfDay(new Date())
+    
+    // The maximum date we can navigate to is the earlier of endDate or today
+    const maxDate = isBefore(end, todayDate) ? end : todayDate
+    
+    let newDate
+    // Don't go beyond the maximum date (allow going to maxDate itself)
+    if (isAfter(next, maxDate)) {
+      // If we can't go to next, but we're not at maxDate, go to maxDate
+      if (isBefore(current, maxDate)) {
+        newDate = format(maxDate, 'yyyy-MM-dd')
+      } else {
+        return
+      }
+    } else {
+      // Allow navigation if next date is equal to or before maxDate
+      newDate = format(next, 'yyyy-MM-dd')
+    }
+    
+    setCurrentViewDate(newDate)
+    
+    // Fetch data for the new date when button is clicked
+    if (showAnalysis && (drawnGeometry || uploadedKML) && viewMode === 'live') {
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+      if (geometry) {
+        const center = calculateGeometryCenter(geometry)
+        if (center) {
+          setLoading(true)
+          try {
+            await fetchDataForDate(center.latitude, center.longitude, newDate)
+          } catch (err) {
+            setError(err.message)
+          } finally {
+            setLoading(false)
+          }
+        }
+      }
+    }
+  }
+
+  const canGoPrevious = () => {
+    if (!currentViewDate) return false
+    const current = startOfDay(new Date(currentViewDate))
+    const start = startOfDay(new Date(startDate))
+    return isAfter(current, start)
+  }
+
+  const canGoNext = () => {
+    if (!currentViewDate) return false
+    const current = startOfDay(new Date(currentViewDate))
+    const end = startOfDay(new Date(endDate))
+    const todayDate = startOfDay(new Date())
+    const maxDate = isBefore(end, todayDate) ? end : todayDate
+    // Can go next if current date is before or equal to maxDate (allow going to most recent date)
+    return isBefore(current, maxDate) || isEqual(current, maxDate)
+  }
+
+  // Parse KML to geometry
+  const parseKMLToGeometry = (kmlContent) => {
+    try {
+      const parser = new DOMParser()
+      const kmlDoc = parser.parseFromString(kmlContent, 'text/xml')
+      const errorNode = kmlDoc.querySelector('parsererror')
+      
+      if (errorNode) {
+        console.error('KML parsing error:', errorNode.textContent)
+        return null
+      }
+
+      const coordinatesElements = kmlDoc.querySelectorAll('coordinates')
+      if (coordinatesElements.length > 0) {
+        const coordsText = coordinatesElements[0].textContent.trim()
+        const coordPairs = coordsText.split(/\s+/).filter(c => c.trim())
+        
+        const coordinates = coordPairs.map(coord => {
+          const [lng, lat] = coord.split(',').map(Number)
+          return [lng, lat] // GeoJSON format [lng, lat]
+        })
+        
+        return {
+          type: 'Polygon',
+          coordinates: [coordinates]
+        }
+      }
+    } catch (error) {
+      console.error('Error parsing KML:', error)
+    }
+    return null
+  }
+
+  const selectedGeometry = useMemo(
+    () => drawnGeometry || (uploadedKML ? parseKMLToGeometry(uploadedKML.content) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [drawnGeometry, uploadedKML]
+  )
+
+  const handleMapView = useCallback((view) => {
+    setMapView(view)
+  }, [])
+
+  const handleOpen3DView = () => {
+    // Drawn area → building focus; otherwise tilt the current map view into 3D.
+    if (!selectedGeometry && !mapView) return
+    setShow3DView(true)
+  }
+
+  const handleOpenAqiCalendar = async () => {
+    if (!selectedGeometry) {
+      window.alert('Draw an area (or upload a KML) first, then open AQI Calendar.')
+      return
+    }
+
+    const center = calculateGeometryCenter(selectedGeometry)
+    const latitude = center?.latitude
+    const longitude = center?.longitude
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      window.alert('Could not read the center of the drawn area. Try drawing again.')
+      return
+    }
+
+    setCalendarResolving(true)
+    try {
+      const place = await resolveCityFromCoords(latitude, longitude)
+      const year = new Date().getFullYear()
+      const params = new URLSearchParams({
+        slug: place.slug,
+        slugType: place.slugType || 'cityId',
+        name: String(place.cityName || place.title || place.slug || '').toLowerCase(),
+        year: String(year),
+        lat: String(latitude),
+        lng: String(longitude)
+      })
+      const aoiPayload = {
+        geometry: selectedGeometry,
+        source: uploadedKML ? 'kml' : 'draw',
+        kml: uploadedKML
+          ? { name: uploadedKML.name, content: uploadedKML.content }
+          : null
+      }
+      try {
+        sessionStorage.setItem('climateeye-aqi-calendar-aoi', JSON.stringify(aoiPayload))
+      } catch {
+        // Ignore quota / private-mode failures; navigate state still carries geometry.
+      }
+      navigate(`/aqi-calendar?${params.toString()}`, {
+        state: aoiPayload
+      })
+    } catch (err) {
+      window.alert(err.message || 'Could not resolve city for this area')
+    } finally {
+      setCalendarResolving(false)
+    }
+  }
+
+  // Helper function to aggregate hourly data
+  const aggregateHourlyData = (hourlyRecords, type) => {
+    if (!hourlyRecords || hourlyRecords.length === 0) return null
+
+    if (type === 'aqi') {
+      const validRecords = hourlyRecords.filter(r => r.aqi !== null && r.aqi !== undefined)
+      if (validRecords.length === 0) return null
+
+      return {
+        aqi: Math.round(validRecords.reduce((sum, r) => sum + r.aqi, 0) / validRecords.length),
+        pm2_5: validRecords.reduce((sum, r) => sum + (r.pm2_5 || 0), 0) / validRecords.length,
+        pm10: validRecords.reduce((sum, r) => sum + (r.pm10 || 0), 0) / validRecords.length,
+        co: validRecords.reduce((sum, r) => sum + (r.co || 0), 0) / validRecords.length,
+        so2: validRecords.reduce((sum, r) => sum + (r.so2 || 0), 0) / validRecords.length,
+        no2: validRecords.reduce((sum, r) => sum + (r.no2 || 0), 0) / validRecords.length,
+        o3: validRecords.reduce((sum, r) => sum + (r.o3 || 0), 0) / validRecords.length,
+        date: hourlyRecords[hourlyRecords.length - 1]?.date || new Date().toISOString()
+      }
+    } else {
+      const validRecords = hourlyRecords.filter(r => r.temperature !== null && r.temperature !== undefined)
+      if (validRecords.length === 0) return null
+
+      return {
+        temperature: Math.round(validRecords.reduce((sum, r) => sum + r.temperature, 0) / validRecords.length),
+        feels_like: validRecords.reduce((sum, r) => sum + (r.feels_like || r.temperature), 0) / validRecords.length,
+        humidity: validRecords.reduce((sum, r) => sum + (r.humidity || 0), 0) / validRecords.length,
+        wind_speed: validRecords.reduce((sum, r) => sum + (r.wind_speed || 0), 0) / validRecords.length,
+        uv_index: validRecords.reduce((sum, r) => sum + (r.uv_index || 0), 0) / validRecords.length,
+        condition: validRecords[validRecords.length - 1]?.condition || 'Unknown',
+        icon: validRecords[validRecords.length - 1]?.icon || 'cloud',
+        date: hourlyRecords[hourlyRecords.length - 1]?.date || new Date().toISOString()
+      }
+    }
+  }
+
+  // Fetch data based on view mode
+  const fetchDataForMode = async (latitude, longitude) => {
+    setLoading(true)
+    setError(null)
+    setWeatherData(null)
+    setAqiData(null)
+
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      
+      if (viewMode === 'live') {
+        // Live: Current data (no date parameter)
+        const [weather, aqi] = await Promise.all([
+          fetchWeatherData(latitude, longitude),
+          fetchAQIData(latitude, longitude)
+        ])
+        setWeatherData(weather)
+        setAqiData(aqi)
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours (today's hourly data)
+        const [weatherHourly, aqiHourly] = await Promise.all([
+          fetchHourlyWeatherData(latitude, longitude, today),
+          fetchHourlyAQIData(latitude, longitude, today)
+        ])
+        
+        const weatherAggregated = aggregateHourlyData(weatherHourly.hourly_records || [], 'weather')
+        const aqiAggregated = aggregateHourlyData(aqiHourly.hourly_records || [], 'aqi')
+        
+        setWeatherData(weatherAggregated)
+        setAqiData(aqiAggregated)
+      } else if (viewMode === 'weekly') {
+        // Weekly: Past 7 days
+        const weekAgo = format(subDays(new Date(), 7), 'yyyy-MM-dd')
+        
+        // Fetch weather data for each day in the week
+        const weatherPromises = []
+        for (let i = 0; i < 7; i++) {
+          const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+          weatherPromises.push(fetchHourlyWeatherData(latitude, longitude, date))
+        }
+        
+        const [weatherResults, aqiRange] = await Promise.all([
+          Promise.all(weatherPromises),
+          fetchHourlyAQIDataRange(latitude, longitude, weekAgo, today)
+        ])
+        
+        const allWeatherRecords = weatherResults.flatMap(r => r.hourly_records || [])
+        const weatherAggregated = aggregateHourlyData(allWeatherRecords, 'weather')
+        const aqiAggregated = aggregateHourlyData(aqiRange.hourly_records || [], 'aqi')
+        
+        setWeatherData(weatherAggregated)
+        setAqiData(aqiAggregated)
+      } else if (viewMode === 'monthly') {
+        // Monthly: Past 30 days
+        const monthAgo = format(subDays(new Date(), 30), 'yyyy-MM-dd')
+        
+        // Fetch weather data for each day in the month (limit to 30 days to avoid too many requests)
+        const weatherPromises = []
+        for (let i = 0; i < 30; i++) {
+          const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+          weatherPromises.push(fetchHourlyWeatherData(latitude, longitude, date))
+        }
+        
+        const [weatherResults, aqiRange] = await Promise.all([
+          Promise.all(weatherPromises),
+          fetchHourlyAQIDataRange(latitude, longitude, monthAgo, today)
+        ])
+        
+        const allWeatherRecords = weatherResults.flatMap(r => r.hourly_records || [])
+        const weatherAggregated = aggregateHourlyData(allWeatherRecords, 'weather')
+        const aqiAggregated = aggregateHourlyData(aqiRange.hourly_records || [], 'aqi')
+        
+        setWeatherData(weatherAggregated)
+        setAqiData(aqiAggregated)
+      }
+    } catch (err) {
+      setError(err.message)
+      console.error('Error fetching data:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Fetch data for a specific date (legacy function for date navigation)
+  const fetchDataForDate = async (latitude, longitude, date) => {
+    setLoading(true)
+    setError(null)
+    setWeatherData(null)
+    setAqiData(null)
+
+    try {
+      const [weather, aqi] = await Promise.all([
+        fetchWeatherData(latitude, longitude, date),
+        fetchAQIData(latitude, longitude, date)
+      ])
+
+      setWeatherData(weather)
+      setAqiData(aqi)
+    } catch (err) {
+      setError(err.message)
+      console.error('Error fetching data:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Unified live data fetcher: makes 3 API calls once and processes all chart data from shared results
+  const fetchAllLiveData = async (latitude, longitude) => {
+    setLoading(true)
+    setLoadingChart(true)
+    setLoadingTimeChart(true)
+    setError(null)
+    setWeatherData(null)
+    setAqiData(null)
+    setLiveHourlyChartData([])
+    setAqiChartData([])
+    setTimeChartData([])
+
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const now = new Date()
+
+      // Single Promise.all: weather summary + AQI summary + hourly AQI (shared by both charts)
+      const [weather, aqi, aqiHourly] = await Promise.all([
+        fetchWeatherData(latitude, longitude),
+        fetchAQIData(latitude, longitude),
+        fetchHourlyAQIData(latitude, longitude, today)
+      ])
+
+      setWeatherData(weather)
+      setAqiData(aqi)
+
+      // Process hourly records once for both charts
+      const records = transformRecordsByHeight(aqiHourly.hourly_records || [], selectedHeight)
+      const oneHourAgo = subHours(now, 1)
+      const lastHourRecords = records
+        .filter(r => {
+          if (!r || r.aqi === null || r.aqi === undefined) return false
+          const recordTime = parseISO(r.date)
+          return recordTime >= oneHourAgo
+        })
+        .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+
+      const minuteBuckets = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+
+      // AQI Trend chart data
+      let aqiChartResult
+      if (lastHourRecords.length > 0) {
+        aqiChartResult = minuteBuckets.map(minute => {
+          const targetTime = subHours(now, 1).getTime() + (60 - minute) * 60 * 1000
+          const closestRecord = lastHourRecords.reduce((closest, record) => {
+            const recordTime = parseISO(record.date).getTime()
+            const closestTime = closest ? parseISO(closest.date).getTime() : null
+            if (!closestTime) return record
+            return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+          }, null)
+          return {
+            time: minute.toString(),
+            aqi: closestRecord ? closestRecord.aqi : (lastHourRecords[0]?.aqi || 0),
+            fullTime: closestRecord ? closestRecord.date : now.toISOString(),
+            minute
+          }
+        })
+      } else {
+        const fallback = records.slice(-12).filter(r => r && r.aqi !== null && r.aqi !== undefined)
+        aqiChartResult = minuteBuckets.map((minute, idx) => ({
+          time: minute.toString(),
+          aqi: fallback[idx]?.aqi || fallback[0]?.aqi || 0,
+          fullTime: fallback[idx]?.date || now.toISOString(),
+          minute
+        }))
+      }
+      setAqiChartData(aqiChartResult)
+
+      // Time chart data (same shared records)
+      const timeChartResult = minuteBuckets.map(minute => {
+        const targetTime = subHours(now, 1).getTime() + (60 - minute) * 60 * 1000
+        const closestRecord = lastHourRecords.reduce((closest, record) => {
+          const recordTime = parseISO(record.date).getTime()
+          const closestTime = closest ? parseISO(closest.date).getTime() : null
+          if (!closestTime) return record
+          return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+        }, null)
+        const recordTime = closestRecord ? parseISO(closestRecord.date) : now
+        const timeStr = format(recordTime, 'HH:mm')
+        return {
+          day: minute.toString(),
+          time: timeStr,
+          timeMinutes: timeToMinutes(timeStr),
+          aqi: closestRecord ? closestRecord.aqi : 0,
+          fullTime: closestRecord ? closestRecord.date : now.toISOString()
+        }
+      })
+      setTimeChartData(timeChartResult)
+
+    } catch (err) {
+      setError(err.message)
+      console.error('Error fetching live data:', err)
+    } finally {
+      setLoading(false)
+      setLoadingChart(false)
+      setLoadingTimeChart(false)
+    }
+  }
+
+  // Handle view mode change
+  const handleViewModeChange = async (mode) => {
+    setViewMode(mode)
+    // Clear all chart data immediately so previous mode's data is not shown
+    setLiveHourlyChartData([])
+    setAqiChartData([])
+    setTimeChartData([])
+    setLoadingChart(true)
+    setLoadingTimeChart(true)
+
+    if (showAnalysis && (drawnGeometry || uploadedKML)) {
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+
+      if (geometry) {
+        const center = calculateGeometryCenter(geometry)
+        if (center) {
+          if (mode === 'live') {
+            // Single unified fetch for live mode — avoids duplicate API calls
+            await fetchAllLiveData(center.latitude, center.longitude)
+          } else {
+            setLoadingTimeChart(true)
+            await Promise.all([
+              fetchDataForMode(center.latitude, center.longitude),
+              fetchAQIChartData(center.latitude, center.longitude),
+              fetchTimeChartData(center.latitude, center.longitude)
+            ])
+          }
+        }
+      }
+    } else {
+      setLoadingChart(false)
+      setLoadingTimeChart(false)
+      setLiveHourlyChartData([])
+      setAqiChartData([])
+      setTimeChartData([])
+    }
+  }
+
+  // Handle AQI Trend chart refresh
+  const handleRefreshAQIChart = async () => {
+    if (!showAnalysis || (!drawnGeometry && !uploadedKML)) return
+    
+    let geometry = drawnGeometry
+    if (!geometry && uploadedKML) {
+      geometry = parseKMLToGeometry(uploadedKML.content)
+    }
+
+    if (geometry) {
+      const center = calculateGeometryCenter(geometry)
+      if (center) {
+        if (viewMode === 'live') {
+          await fetchAllLiveData(center.latitude, center.longitude)
+        } else {
+          setLoadingChart(true)
+          await fetchAQIChartData(center.latitude, center.longitude)
+        }
+      }
+    }
+  }
+
+  // Handle Time chart refresh
+  const handleRefreshTimeChart = async () => {
+    if (!showAnalysis || (!drawnGeometry && !uploadedKML)) return
+    
+    let geometry = drawnGeometry
+    if (!geometry && uploadedKML) {
+      geometry = parseKMLToGeometry(uploadedKML.content)
+    }
+
+    if (geometry) {
+      const center = calculateGeometryCenter(geometry)
+      if (center) {
+        if (viewMode === 'live') {
+          await fetchAllLiveData(center.latitude, center.longitude)
+        } else {
+          setLoadingTimeChart(true)
+          await fetchTimeChartData(center.latitude, center.longitude)
+        }
+      }
+    }
+  }
+
+  // Handle analyse button click
+  const handleAnalyse = async () => {
+    if (!drawnGeometry && !uploadedKML) {
+      alert('Please draw an area or upload a KML file first')
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+
+    try {
+      // Get geometry (from drawing or KML)
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+
+      if (!geometry) {
+        throw new Error('Could not parse geometry')
+      }
+
+      // Calculate center coordinates
+      const center = calculateGeometryCenter(geometry)
+      if (!center) {
+        throw new Error('Could not calculate center coordinates')
+      }
+
+      // Set current view date to end date (last date)
+      const viewDate = endDate
+      setCurrentViewDate(viewDate)
+      setShowAnalysis(true)
+      // Reset to live mode when starting new analysis
+      setViewMode('live')
+
+      // Single unified fetch for live mode — avoids duplicate API calls
+      await fetchAllLiveData(center.latitude, center.longitude)
+    } catch (err) {
+      setError(err.message)
+      alert(`Error: ${err.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Removed automatic API call on selectedHeight change
+  // Data will only refresh when user explicitly clicks buttons or changes view mode
+  // useEffect(() => {
+  //   if (showAnalysis && currentViewDate && (drawnGeometry || uploadedKML)) {
+  //     const geometry = drawnGeometry || (uploadedKML ? parseKMLToGeometry(uploadedKML.content) : null)
+  //     if (geometry) {
+  //       const center = calculateGeometryCenter(geometry)
+  //       if (center) {
+  //         if (viewMode === 'live') {
+  //           fetchDataForDate(center.latitude, center.longitude, currentViewDate)
+  //         } else {
+  //           fetchDataForMode(center.latitude, center.longitude)
+  //         }
+  //         // Refresh chart data
+  //         fetchAQIChartData(center.latitude, center.longitude)
+  //         fetchTimeChartData(center.latitude, center.longitude)
+  //       }
+  //     }
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [selectedHeight])
+
+  // Removed automatic API call on date change
+  // Data will only refresh when user explicitly clicks date navigation buttons
+  // useEffect(() => {
+  //   if (showAnalysis && currentViewDate && (drawnGeometry || uploadedKML) && viewMode === 'live') {
+  //     let geometry = drawnGeometry
+  //     if (!geometry && uploadedKML) {
+  //       geometry = parseKMLToGeometry(uploadedKML.content)
+  //     }
+
+  //     if (geometry) {
+  //       const center = calculateGeometryCenter(geometry)
+  //       if (center) {
+  //         fetchDataForDate(center.latitude, center.longitude, currentViewDate)
+  //       }
+  //     }
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [currentViewDate, showAnalysis])
+
+  // Fetch AQI chart data based on view mode
+  const fetchAQIChartData = async (latitude, longitude) => {
+    setLoadingChart(true)
+    setAqiChartData([])
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const now = new Date()
+      let chartData = []
+
+      if (viewMode === 'live') {
+        // Live: Last 60 minutes - X-axis shows 1, 5, 10, ..., 60
+        const aqiHourly = await fetchHourlyAQIData(latitude, longitude, today)
+        const records = transformRecordsByHeight(aqiHourly.hourly_records || [], selectedHeight)
+        
+        // Get records from the last hour (60 minutes)
+        const oneHourAgo = subHours(now, 1)
+        const lastHourRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= oneHourAgo
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        // Create minute buckets (1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60)
+        const minuteBuckets = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+        
+        if (lastHourRecords.length > 0) {
+          // Map records to closest minute bucket
+          chartData = minuteBuckets.map(minute => {
+            const targetTime = subHours(now, 1).getTime() + (60 - minute) * 60 * 1000
+            const closestRecord = lastHourRecords.reduce((closest, record) => {
+              const recordTime = parseISO(record.date).getTime()
+              const closestTime = closest ? parseISO(closest.date).getTime() : null
+              if (!closestTime) return record
+              return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+            }, null)
+            
+            return {
+              time: minute.toString(),
+              aqi: closestRecord ? closestRecord.aqi : (lastHourRecords[0]?.aqi || 0),
+              fullTime: closestRecord ? closestRecord.date : now.toISOString(),
+              minute: minute
+            }
+          })
+        } else {
+          // Fallback: use last few records and map to minute positions
+          const fallbackRecords = records.slice(-12).filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          chartData = minuteBuckets.map((minute, idx) => ({
+            time: minute.toString(),
+            aqi: fallbackRecords[idx]?.aqi || fallbackRecords[0]?.aqi || 0,
+            fullTime: fallbackRecords[idx]?.date || now.toISOString(),
+            minute: minute
+          }))
+        }
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours from current time - X-axis shows 1, 2, 3, ..., 24
+        const twentyFourHoursAgo = subHours(now, 24)
+        const startDate = format(twentyFourHoursAgo, 'yyyy-MM-dd')
+        const endDate = today
+        
+        // Fetch data from 24 hours ago to today (may span 2 calendar days)
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, startDate, endDate)
+        const records = transformRecordsByHeight(aqiRange.hourly_records || [], selectedHeight)
+        
+        // Get last 24 hours of records from current time
+        const last24HoursRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= twentyFourHoursAgo && recordTime <= now
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        // Create hour buckets (1-24) representing hours from 24 hours ago to now
+        const hourBuckets = Array.from({ length: 24 }, (_, i) => i + 1)
+        
+        if (last24HoursRecords.length > 0) {
+          // Map records to hour positions (1 = 24 hours ago, 24 = current hour)
+          const hourMap = new Map()
+          last24HoursRecords.forEach(record => {
+            const recordTime = parseISO(record.date)
+            const hoursDiff = Math.floor((now - recordTime) / (1000 * 60 * 60))
+            const hourPosition = 24 - hoursDiff
+            if (hourPosition >= 1 && hourPosition <= 24) {
+              if (!hourMap.has(hourPosition)) {
+                hourMap.set(hourPosition, [])
+              }
+              hourMap.get(hourPosition).push(record.aqi)
+            }
+          })
+          
+          chartData = hourBuckets.map(hour => {
+            const aqis = hourMap.get(hour) || []
+            const avgAqi = aqis.length > 0 
+              ? Math.round(aqis.reduce((sum, val) => sum + val, 0) / aqis.length)
+              : (last24HoursRecords[0]?.aqi || 0)
+            
+            // Calculate the actual time for this hour bucket
+            const bucketTime = subHours(now, 24 - hour)
+            const timeLabel = format(bucketTime, 'HH:mm')
+            
+            return {
+              time: timeLabel,
+              aqi: avgAqi,
+              fullTime: bucketTime.toISOString(),
+              hour: hour
+            }
+          })
+        } else {
+          // Fallback: use available records
+          chartData = hourBuckets.map((hour, idx) => {
+            const bucketTime = subHours(now, 24 - hour)
+            const timeLabel = format(bucketTime, 'HH:mm')
+            return {
+              time: timeLabel,
+              aqi: records[idx]?.aqi || records[0]?.aqi || 0,
+              fullTime: records[idx]?.date || bucketTime.toISOString(),
+              hour: hour
+            }
+          })
+        }
+      } else if (viewMode === 'weekly') {
+        // Weekly: Last 7 days - X-axis shows 1st day, 2nd day, ..., 7th day
+        const weekAgo = format(subDays(now, 6), 'yyyy-MM-dd') // 6 days ago + today = 7 days
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, weekAgo, today)
+        console.log("7 Days data fetched", aqiRange)
+        const records = transformRecordsByHeight(aqiRange.hourly_records || [], selectedHeight)
+        
+        // Group by date and calculate daily averages
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { aqis: [], date: date }
+            }
+            dailyData[dateKey].aqis.push(record.aqi)
+          })
+        
+        // Sort dates and map to actual dates
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          const avgAqi = Math.round(dayData.aqis.reduce((sum, val) => sum + val, 0) / dayData.aqis.length)
+          const dayNumber = index + 1
+          // Format date as "MMM dd" (e.g., "Jan 15")
+          const dateLabel = format(dayData.date, 'MMM dd')
+          
+          return {
+            time: dateLabel,
+            aqi: avgAqi,
+            fullTime: dateKey,
+            day: dayNumber
+          }
+        })
+      } else if (viewMode === 'monthly') {
+        // Monthly: Last 30/31 days - X-axis shows 1, 2, 3, ..., 30/31
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+        const daysToShow = Math.min(31, daysInMonth)
+        const monthAgo = format(subDays(now, daysToShow - 1), 'yyyy-MM-dd')
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, monthAgo, today)
+        console.log("30 Days data fetched", aqiRange)
+        const records = transformRecordsByHeight(aqiRange.hourly_records || [], selectedHeight)
+        
+        // Group by date and calculate daily averages
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { aqis: [], date: date }
+            }
+            dailyData[dateKey].aqis.push(record.aqi)
+          })
+        
+        // Sort dates and map to actual dates
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          const avgAqi = Math.round(dayData.aqis.reduce((sum, val) => sum + val, 0) / dayData.aqis.length)
+          // Format date as "MMM dd" (e.g., "Jan 15")
+          const dateLabel = format(dayData.date, 'MMM dd')
+          
+          return {
+            time: dateLabel,
+            aqi: avgAqi,
+            fullTime: dateKey,
+            day: index + 1
+          }
+        })
+        
+        // Ensure we have data points for all days with dates
+        if (chartData.length < daysToShow) {
+          const dateMap = new Map()
+          chartData.forEach(d => dateMap.set(d.fullTime, d.aqi))
+          
+          const allDays = Array.from({ length: daysToShow }, (_, i) => {
+            const dayDate = subDays(now, daysToShow - i - 1)
+            const dateKey = format(dayDate, 'yyyy-MM-dd')
+            const dateLabel = format(dayDate, 'MMM dd')
+            return {
+              time: dateLabel,
+              aqi: dateMap.get(dateKey) || (chartData[0]?.aqi || 0),
+              fullTime: dateKey,
+              day: i + 1
+            }
+          })
+          chartData = allDays
+        }
+      }
+
+      setAqiChartData(chartData)
+    } catch (err) {
+      console.error('Error fetching AQI chart data:', err)
+      setAqiChartData([])
+    } finally {
+      setLoadingChart(false)
+    }
+  }
+
+  // Helper function to get day suffix (1st, 2nd, 3rd, etc.)
+  const getDaySuffix = (day) => {
+    if (day >= 11 && day <= 13) return 'th'
+    switch (day % 10) {
+      case 1: return 'st'
+      case 2: return 'nd'
+      case 3: return 'rd'
+      default: return 'th'
+    }
+  }
+
+  // Helper function to convert time string (HH:mm) to minutes for Y-axis
+  const timeToMinutes = (timeStr) => {
+    const [hours, minutes] = timeStr.split(':').map(Number)
+    return hours * 60 + minutes
+  }
+
+  // Helper function to convert minutes to time string (HH:mm)
+  const minutesToTime = (minutes) => {
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`
+  }
+
+  // Fetch Time chart data based on view mode
+  const fetchTimeChartData = async (latitude, longitude) => {
+    setLoadingTimeChart(true)
+    setTimeChartData([])
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const now = new Date()
+      let chartData = []
+
+      if (viewMode === 'live') {
+        // Live: Last 60 minutes - X-axis: minutes (1-60), Y-axis: time (HH:mm)
+        const aqiHourly = await fetchHourlyAQIData(latitude, longitude, today)
+        console.log("60 Minutes data fetched", aqiHourly)
+        const records = transformRecordsByHeight(aqiHourly.hourly_records || [], selectedHeight)
+        
+        const oneHourAgo = subHours(now, 1)
+        const lastHourRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= oneHourAgo
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        const minuteBuckets = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+        
+        chartData = minuteBuckets.map(minute => {
+          const targetTime = subHours(now, 1).getTime() + (60 - minute) * 60 * 1000
+          const closestRecord = lastHourRecords.reduce((closest, record) => {
+            const recordTime = parseISO(record.date).getTime()
+            const closestTime = closest ? parseISO(closest.date).getTime() : null
+            if (!closestTime) return record
+            return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+          }, null)
+          
+          const recordTime = closestRecord ? parseISO(closestRecord.date) : now
+          const timeStr = format(recordTime, 'HH:mm')
+          
+          return {
+            day: minute.toString(),
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: closestRecord ? closestRecord.aqi : 0,
+            fullTime: closestRecord ? closestRecord.date : now.toISOString()
+          }
+        })
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours from current time - X-axis: hours (1-24), Y-axis: time (HH:mm)
+        const twentyFourHoursAgo = subHours(now, 24)
+        const startDate = format(twentyFourHoursAgo, 'yyyy-MM-dd')
+        const endDate = today
+        
+        // Fetch data from 24 hours ago to today (may span 2 calendar days)
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, startDate, endDate)
+        console.log("24 Hours data fetched", aqiRange)
+        const records = transformRecordsByHeight(aqiRange.hourly_records || [], selectedHeight)
+        
+        // Get last 24 hours of records from current time
+        const last24HoursRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= twentyFourHoursAgo && recordTime <= now
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        const hourBuckets = Array.from({ length: 24 }, (_, i) => i + 1)
+        
+        chartData = hourBuckets.map(hour => {
+          // Calculate the target time for this hour bucket (hour 1 = 24 hours ago, hour 24 = now)
+          const targetTime = subHours(now, 24 - hour)
+          const targetTimeMs = targetTime.getTime()
+          
+          // Find the closest record to this target time
+          const closestRecord = last24HoursRecords.reduce((closest, record) => {
+            const recordTime = parseISO(record.date).getTime()
+            const closestTime = closest ? parseISO(closest.date).getTime() : null
+            if (!closestTime) return record
+            return Math.abs(recordTime - targetTimeMs) < Math.abs(closestTime - targetTimeMs) ? record : closest
+          }, null)
+          
+          // Use the actual time of the record, or the target time if no record found
+          const recordTime = closestRecord ? parseISO(closestRecord.date) : targetTime
+          const timeStr = format(recordTime, 'HH:mm')
+          
+          return {
+            day: hour.toString(),
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: closestRecord ? closestRecord.aqi : 0,
+            fullTime: closestRecord ? closestRecord.date : targetTime.toISOString()
+          }
+        })
+      } else if (viewMode === 'weekly') {
+        // Weekly: Last 7 days - X-axis: days (1-7), Y-axis: AQI values
+        const weekAgo = format(subDays(now, 6), 'yyyy-MM-dd')
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, weekAgo, today)
+        console.log("7 Days data fetched", aqiRange)
+        const records = transformRecordsByHeight(aqiRange.hourly_records || [], selectedHeight)
+        
+        // Group by date and get all records with their times
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { records: [], date: date }
+            }
+            dailyData[dateKey].records.push({
+              aqi: record.aqi,
+              time: format(date, 'HH:mm'),
+              fullTime: record.date
+            })
+          })
+        
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          const dayNumber = index + 1
+          // Get day name (Monday, Tuesday, etc.)
+          const dayName = format(dayData.date, 'EEEE')
+          
+          // Get average AQI for this day
+          const avgAqi = dayData.records.length > 0
+            ? Math.round(dayData.records.reduce((sum, r) => sum + r.aqi, 0) / dayData.records.length)
+            : 0
+          
+          // Get the time when AQI was recorded (use the record with closest AQI to average, or first record)
+          const closestRecord = dayData.records.reduce((closest, record) => {
+            if (!closest) return record
+            return Math.abs(record.aqi - avgAqi) < Math.abs(closest.aqi - avgAqi) ? record : closest
+          }, null)
+          
+          const timeStr = closestRecord ? closestRecord.time : format(dayData.date, 'HH:mm')
+          
+          return {
+            day: dayName,
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: avgAqi,
+            fullTime: dateKey,
+            dayNumber: dayNumber
+          }
+        })
+      } else if (viewMode === 'monthly') {
+        // Monthly: Last 30/31 days - X-axis: days (1-30/31), Y-axis: AQI values
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+        const daysToShow = Math.min(31, daysInMonth)
+        const monthAgo = format(subDays(now, daysToShow - 1), 'yyyy-MM-dd')
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, monthAgo, today)
+        console.log("30 Days data fetched", aqiRange)
+        const records = transformRecordsByHeight(aqiRange.hourly_records || [], selectedHeight)
+        
+        // Group by date and get all records with their times
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { records: [], date: date }
+            }
+            dailyData[dateKey].records.push({
+              aqi: record.aqi,
+              time: format(date, 'HH:mm'),
+              fullTime: record.date
+            })
+          })
+        
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          
+          // Get average AQI for this day
+          const avgAqi = dayData.records.length > 0
+            ? Math.round(dayData.records.reduce((sum, r) => sum + r.aqi, 0) / dayData.records.length)
+            : 0
+          
+          // Get the time when AQI was recorded (use the record with closest AQI to average, or first record)
+          const closestRecord = dayData.records.reduce((closest, record) => {
+            if (!closest) return record
+            return Math.abs(record.aqi - avgAqi) < Math.abs(closest.aqi - avgAqi) ? record : closest
+          }, null)
+          
+          const timeStr = closestRecord ? closestRecord.time : format(dayData.date, 'HH:mm')
+          
+          return {
+            day: (index + 1).toString(),
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: avgAqi,
+            fullTime: dateKey,
+            dayNumber: index + 1
+          }
+        })
+      }
+
+      setTimeChartData(chartData)
+    } catch (err) {
+      console.error('Error fetching time chart data:', err)
+      setTimeChartData([])
+    } finally {
+      setLoadingTimeChart(false)
+    }
+  }
+
+  // Removed automatic API call on view mode change
+  // Data will only refresh when user explicitly clicks view mode buttons (60 Minutes, 24 Hours, etc.)
+  // useEffect(() => {
+  //   if (showAnalysis && (drawnGeometry || uploadedKML)) {
+  //     let geometry = drawnGeometry
+  //     if (!geometry && uploadedKML) {
+  //       geometry = parseKMLToGeometry(uploadedKML.content)
+  //     }
+
+  //     if (geometry) {
+  //       const center = calculateGeometryCenter(geometry)
+  //       if (center) {
+  //         // Set loading state when view mode changes
+  //         setLoadingChart(true)
+  //         setLoadingTimeChart(true)
+  //         Promise.all([
+  //           fetchDataForMode(center.latitude, center.longitude),
+  //           fetchAQIChartData(center.latitude, center.longitude),
+  //           fetchTimeChartData(center.latitude, center.longitude)
+  //         ])
+  //       }
+  //     }
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [viewMode])
+
+  return (
+    <div className={`dashboard${show3DView && !showAnalysis ? ' dashboard--3d' : ''}`}>
+      <header className="dashboard-header">
+        <div className="header-left">
+          <div className="logo-container">
+            <div className="logo-icon">
+              <div className="logo-eye">
+                <div className="eye-pupil"></div>
+                <div className="eye-shine"></div>
+              </div>
+              <div className="logo-ring"></div>
+            </div>
+            <h1 className="logo-text">Climate Eye</h1>
+          </div>
+        </div>
+
+        <nav className="product-section-nav" aria-label="Product sections">
+          <button
+            type="button"
+            className={`product-section-tab${productSection === 'aqi' ? ' is-active' : ''}`}
+            onClick={() => setProductSection('aqi')}
+            aria-pressed={productSection === 'aqi'}
+          >
+            AQI
+          </button>
+          <button
+            type="button"
+            className={`product-section-tab${productSection === 'weather' ? ' is-active' : ''}`}
+            onClick={() => setProductSection('weather')}
+            aria-pressed={productSection === 'weather'}
+          >
+            Weather
+          </button>
+        </nav>
+        
+        <div className="header-right">
+          <button className="logout-button" onClick={handleLogout}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+              <polyline points="16 17 21 12 16 7"></polyline>
+              <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+            <span>Logout</span>
+          </button>
+        </div>
+      </header>
+
+      {productSection === 'weather' ? (
+        <div className="dashboard-content dashboard-content--map-full dashboard-content--weather">
+          <WeatherWorkspace />
+        </div>
+      ) : (
+      <div className={`dashboard-content${!showAnalysis ? ' dashboard-content--map-full' : ''}`}>
+        <main className="main-content">
+          {!showAnalysis && show3DView && (selectedGeometry || mapView) ? (
+            <Suspense fallback={<div className="building-3d-loading">Loading 3D view…</div>}>
+              <Building3DView
+                geometry={selectedGeometry}
+                view={mapView}
+                methaneOverlay={methaneOverlay}
+                onBack={() => setShow3DView(false)}
+              />
+            </Suspense>
+          ) : !showAnalysis ? (
+            <div className="map-wrapper">
+              <div className="map-top-bar">
+                <div className="map-top-bar-group map-top-bar-tools">
+                  <button
+                    className="view-toggle-button"
+                    onClick={handleDrawArea}
+                    disabled={isDrawing}
+                    type="button"
+                    title="Draw area"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                      <path d="M2 17l10 5 10-5"></path>
+                      <path d="M2 12l10 5 10-5"></path>
+                    </svg>
+                    <span className="view-toggle-label">Draw Area</span>
+                  </button>
+
+                  <label className="view-toggle-button map-top-upload" title="Upload KML">
+                    <input
+                      type="file"
+                      accept=".kml,.kmz"
+                      onChange={handleKMLUpload}
+                      style={{ display: 'none' }}
+                    />
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="17 8 12 3 7 8"></polyline>
+                      <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <span className="view-toggle-label">Upload KML</span>
+                  </label>
+
+                  <button
+                    type="button"
+                    className={`view-toggle-button locate-action-button${locateState.active ? ' active' : ''}${locateState.locating ? ' locating' : ''}`}
+                    onClick={() => setLocateRequest((n) => n + 1)}
+                    disabled={locateState.locating}
+                    title={locateState.active ? 'Hide my location' : 'Show my location'}
+                    aria-pressed={locateState.active}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <circle cx="12" cy="12" r="3"></circle>
+                      <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+                    </svg>
+                    <span className="view-toggle-label">Locate me</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`view-toggle-button${calendarResolving ? ' active' : ''}${selectedGeometry ? '' : ' is-disabled'}`}
+                    onClick={handleOpenAqiCalendar}
+                    disabled={!selectedGeometry || calendarResolving}
+                    title={
+                      selectedGeometry
+                        ? 'Open month-wise AQI for the city nearest your drawn area'
+                        : 'Draw an area (or upload a KML) to enable AQI Calendar'
+                    }
+                    aria-disabled={!selectedGeometry || calendarResolving}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <rect x="3" y="4" width="18" height="18" rx="2"></rect>
+                      <path d="M16 2v4M8 2v4M3 10h18"></path>
+                    </svg>
+                    <span className="view-toggle-label">
+                      {calendarResolving ? 'Resolving…' : 'AQI Calendar'}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="map-top-bar-search">
+                  <PlaceSearch
+                    map={leafletMap}
+                    selectedPlace={searchedPlace}
+                    onSelect={setSearchedPlace}
+                    onClear={() => setSearchedPlace(null)}
+                  />
+                </div>
+
+                <div className="map-top-bar-group map-top-bar-actions">
+                  <button
+                    className={`view-toggle-button ${loading ? 'active' : ''}`}
+                    onClick={handleAnalyse}
+                    disabled={loading}
+                    type="button"
+                  >
+                    <span>{loading ? 'Loading…' : 'Analyse'}</span>
+                  </button>
+                  <button
+                    className={`view-toggle-button ${methaneOverlay ? 'active' : ''}`}
+                    onClick={handleAnalyseMethane}
+                    disabled={methaneLoading || loading}
+                    type="button"
+                  >
+                    <span className="label-full">{methaneLoading ? 'Loading…' : 'Analysis Methane'}</span>
+                    <span className="label-short">{methaneLoading ? '…' : 'Methane'}</span>
+                  </button>
+                  <button
+                    className={`view-toggle-button ${show3DView ? 'active' : ''}`}
+                    onClick={handleOpen3DView}
+                    disabled={!selectedGeometry && !mapView}
+                    title={selectedGeometry ? 'Show 3D buildings for the drawn area' : 'Show this map area in 3D'}
+                    type="button"
+                  >
+                    <span>3D View</span>
+                  </button>
+                </div>
+
+                <div className="map-top-bar-group map-top-bar-menus">
+                  <div
+                    className={`layers-menu${layersMenuOpen ? ' is-open' : ''}`}
+                    ref={layersMenuRef}
+                  >
+                    <button
+                      type="button"
+                      className={`view-toggle-button layers-menu-trigger${layersMenuOpen || activeLayerCount > 0 ? ' active' : ''}`}
+                      onClick={() => {
+                        setLayersMenuOpen((open) => !open)
+                        setBasemapMenuOpen(false)
+                      }}
+                      title={layersMenuOpen ? 'Close layers' : 'Map layers'}
+                      aria-expanded={layersMenuOpen}
+                      aria-haspopup="true"
+                    >
+                      <span className="layers-menu-icon" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                      <span className="view-toggle-label">Layers</span>
+                      {activeLayerCount > 0 && (
+                        <span className="layers-menu-badge">{activeLayerCount}</span>
+                      )}
+                    </button>
+
+                    <div
+                      className="layers-menu-panel"
+                      role="menu"
+                      aria-hidden={!layersMenuOpen}
+                    >
+                      <button
+                        className={`view-toggle-button layers-menu-item ${showTemperature ? 'active' : ''}`}
+                        onClick={toggleTemperature}
+                        title={showTemperature ? 'Hide temperature' : 'Show temperature on the map'}
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={showTemperature}
+                        style={{ '--item-index': 0 }}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"></path>
+                        </svg>
+                        <span className="view-toggle-label">Temp</span>
+                      </button>
+                      <button
+                        className={`view-toggle-button layers-menu-item ${showRain ? 'active' : ''}`}
+                        onClick={toggleRain}
+                        title={showRain ? 'Hide rain' : 'Show rain on the map'}
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={showRain}
+                        style={{ '--item-index': 1 }}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M16 13V21M8 13V21M12 15V23"></path>
+                          <path d="M20 10.5a5.5 5.5 0 0 0-10.2-2.8A4.5 4.5 0 1 0 6.5 16H19a3.5 3.5 0 0 0 1-5.5z"></path>
+                        </svg>
+                        <span className="view-toggle-label">Rain</span>
+                      </button>
+                      <button
+                        className={`view-toggle-button layers-menu-item ${showWind ? 'active' : ''}`}
+                        onClick={toggleWind}
+                        title={showWind ? 'Hide wind' : 'Show wind on the map'}
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={showWind}
+                        style={{ '--item-index': 2 }}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 8h11a3 3 0 1 0-3-3"></path>
+                          <path d="M3 12h15a3 3 0 1 1-3 3"></path>
+                          <path d="M3 16h8"></path>
+                        </svg>
+                        <span className="view-toggle-label">Wind</span>
+                      </button>
+                      <button
+                        className={`view-toggle-button layers-menu-item ${showAqi ? 'active' : ''}`}
+                        onClick={toggleAqi}
+                        title={
+                          showAqi
+                            ? 'Hide AQI grid'
+                            : 'Show AQI grid for the drawn area (~50–100 m cells)'
+                        }
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={showAqi}
+                        style={{ '--item-index': 3 }}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 2v4"></path>
+                          <path d="M12 18v4"></path>
+                          <path d="M4.93 4.93l2.83 2.83"></path>
+                          <path d="M16.24 16.24l2.83 2.83"></path>
+                          <path d="M2 12h4"></path>
+                          <path d="M18 12h4"></path>
+                          <path d="M4.93 19.07l2.83-2.83"></path>
+                          <path d="M16.24 7.76l2.83-2.83"></path>
+                          <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                        <span className="view-toggle-label">AQI</span>
+                      </button>
+                      <button
+                        className={`view-toggle-button layers-menu-item ${showSensorData ? 'active' : ''}`}
+                        onClick={toggleSensorData}
+                        title={
+                          showSensorData
+                            ? 'Hide nearby aqi.in sensors'
+                            : 'Show nearby aqi.in sensor data for the current map location'
+                        }
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={showSensorData}
+                        style={{ '--item-index': 4 }}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 3v3"></path>
+                          <path d="M12 18v3"></path>
+                          <circle cx="12" cy="12" r="3"></circle>
+                          <path d="M5 8h3M16 8h3M5 16h3M16 16h3"></path>
+                        </svg>
+                        <span className="view-toggle-label">Sensor</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="basemap-picker">
+                    <button
+                      className={`view-toggle-button ${basemapMenuOpen ? 'active' : ''}`}
+                      onClick={() => {
+                        setBasemapMenuOpen((open) => !open)
+                        setLayersMenuOpen(false)
+                      }}
+                      title="Choose basemap"
+                      type="button"
+                      aria-expanded={basemapMenuOpen}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                        <circle cx="12" cy="10" r="3"></circle>
+                      </svg>
+                      <span className="view-toggle-label">{BASEMAPS[viewType]?.label || 'Map'}</span>
+                    </button>
+                    {basemapMenuOpen && (
+                      <div className="basemap-menu" role="menu">
+                        {Object.values(BASEMAPS).map((basemap) => (
+                          <button
+                            key={basemap.id}
+                            className={`view-toggle-button basemap-menu-item ${viewType === basemap.id ? 'active' : ''}`}
+                            onClick={() => selectBasemap(basemap.id)}
+                            type="button"
+                            role="menuitem"
+                          >
+                            <span>{basemap.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {locateState.error && (
+                <div className="locate-toolbar-error locate-toolbar-error--bar">{locateState.error}</div>
+              )}
+
+              {selectedGeometry && (
+                <div className="map-side-panel">
+                  <AreaPollutantsPanel
+                    geometry={selectedGeometry}
+                    areaLabel={uploadedKML ? `KML: ${uploadedKML.name}` : 'Drawn area'}
+                    onClear={handleClearGeometry}
+                  />
+                </div>
+              )}
+
+              {methaneError && <p className="methane-map-note">{methaneError}</p>}
+
+              <MapComponent 
+                viewType={viewType}
+                showWind={showWind}
+                showTemperature={showTemperature}
+                showRain={showRain}
+                showAqi={showAqi}
+                showSensorData={showSensorData}
+                onToggleSensorData={toggleSensorData}
+                drawnGeometry={drawnGeometry}
+                uploadedKML={uploadedKML}
+                isDrawing={isDrawing}
+                onGeometryComplete={handleGeometryComplete}
+                onCancelDrawing={handleCancelDrawing}
+                methaneOverlay={methaneOverlay}
+                methaneLoading={methaneLoading}
+                onClearMethane={handleClearMethane}
+                onMapView={handleMapView}
+                locateRequest={locateRequest}
+                onLocateStateChange={handleLocateStateChange}
+                onMapReady={handleMapReady}
+                searchedPlace={searchedPlace}
+              />
+            </div>
+          ) : (
+            <div className="analysis-content">
+              <button
+                className="back-to-map-button back-to-map-floating"
+                onClick={() => setShowAnalysis(false)}
+                type="button"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+                <span>Back to Map</span>
+              </button>
+              <div className="date-navigation-header">
+                <button 
+                  className="nav-arrow-button"
+                  onClick={handlePreviousDate}
+                  disabled={!canGoPrevious() || viewMode !== 'live'}
+                  title="Previous Date"
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="15 18 9 12 15 6"></polyline>
+                  </svg>
+                </button>
+                
+                <div className="current-date-display">
+                  <div className="date-label">Viewing Date</div>
+                  <div className="date-value">
+                    {viewMode === 'live' && currentViewDate 
+                      ? format(new Date(currentViewDate), 'MMM dd, yyyy') 
+                      : viewMode === 'daily' 
+                        ? 'Last 24 Hours'
+                        : viewMode === 'weekly'
+                          ? 'Past 7 Days'
+                          : viewMode === 'monthly'
+                            ? 'Past 30 Days'
+                            : 'N/A'}
+                  </div>
+                </div>
+                
+                <button 
+                  className="nav-arrow-button"
+                  onClick={handleNextDate}
+                  disabled={!canGoNext() || viewMode !== 'live'}
+                  title="Next Date"
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                  </svg>
+                </button>
+              </div>
+
+              {/* View Mode Buttons */}
+              <div className="view-mode-buttons">
+                <button
+                  className={`view-mode-button ${viewMode === 'live' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('live')}
+                  disabled={loading}
+                >
+                  Live
+                </button>
+                <button
+                  className={`view-mode-button ${viewMode === 'daily' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('daily')}
+                  disabled={loading}
+                >
+                  Last 24 Hrs
+                </button>
+                <button
+                  className={`view-mode-button ${viewMode === 'weekly' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('weekly')}
+                  disabled={loading}
+                >
+                  Weekly
+                </button>
+                <button
+                  className={`view-mode-button ${viewMode === 'monthly' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('monthly')}
+                  disabled={loading}
+                >
+                  Monthly
+                </button>
+              </div>
+
+              {error && (
+                <div className="error-banner">
+                  <p>Error: {error}</p>
+                </div>
+              )}
+
+              {viewMode === 'live' ? (
+                <LiveDashboardCards 
+                  aqiData={aqiData}
+                  weatherData={weatherData}
+                  geometry={drawnGeometry || (uploadedKML ? parseKMLToGeometry(uploadedKML.content) : null)}
+                  date={format(new Date(), 'yyyy-MM-dd')}
+                  selectedHeight={selectedHeight}
+                />
+              ) : (
+                <div className="analysis-sections">
+                  <WeatherSection 
+                    geometry={drawnGeometry || (uploadedKML ? parseKMLToGeometry(uploadedKML.content) : null)}
+                    startDate={startDate}
+                    endDate={endDate}
+                    date={currentViewDate} 
+                    data={weatherData}
+                    isLive={viewMode === 'live'}
+                    loading={loading}
+                    viewMode={viewMode}
+                    selectedHeight={selectedHeight}
+                  />
+                  <AQISection
+                    geometry={drawnGeometry || (uploadedKML ? parseKMLToGeometry(uploadedKML.content) : null)}
+                    startDate={startDate}
+                    endDate={endDate} 
+                    date={currentViewDate} 
+                    data={aqiData}
+                    isLive={viewMode === 'live'}
+                    loading={loading}
+                    viewMode={viewMode}
+                    selectedHeight={selectedHeight}
+                  />
+                </div>
+              )}
+
+              {viewMode !== 'live' && (
+                <>
+                {/* AQI Chart */}
+                <div className="aqi-chart-container">
+                  <div className="chart-header">
+                    <h3 className="chart-title">AQI Trend</h3>
+                    <div className="chart-header-right">
+                      <div className="chart-mode-indicator">
+                        {viewMode === 'live' && <span>Last 1 Hour</span>}
+                        {viewMode === 'daily' && <span>Last 24 Hours</span>}
+                        {viewMode === 'weekly' && <span>Last 7 Days</span>}
+                        {viewMode === 'monthly' && <span>Last 30 Days</span>}
+                      </div>
+                      <button 
+                        className="chart-refresh-button"
+                        onClick={handleRefreshAQIChart}
+                        disabled={loadingChart || !showAnalysis}
+                        title="Refresh AQI Trend Chart"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
+                          <path d="M21 3v5h-5"></path>
+                          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
+                          <path d="M3 21v-5h5"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {loadingChart ? (
+                    <div className="chart-loading">
+                      <div className="loading-spinner"></div>
+                      <p className="loading-message">Please wait, data is loading...</p>
+                    </div>
+                  ) : aqiChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <LineChart 
+                        data={aqiChartData} 
+                        margin={{ top: 10, right: 30, left: 0, bottom: viewMode === 'weekly' ? 60 : 40 }}
+                      >
+                        {/* AQI Category Background Sections - Render before grid so they appear behind */}
+                        {/* Good: 0-50 (Green) */}
+                        <ReferenceArea 
+                          y1={0} 
+                          y2={50} 
+                          fill="#10B981" 
+                          fillOpacity={0.6}
+                          stroke="none"
+                        />
+                        {/* Moderate: 51-100 (Orange) */}
+                        <ReferenceArea 
+                          y1={50} 
+                          y2={100} 
+                          fill="#F59E0B" 
+                          fillOpacity={0.6}
+                          stroke="none"
+                        />
+                        {/* Poor: 101-150 (Dark Orange/Brown) */}
+                        <ReferenceArea 
+                          y1={100} 
+                          y2={150} 
+                          fill="#F97316" 
+                          fillOpacity={0.6}
+                          stroke="none"
+                        />
+                        {/* Unhealthy: 151-200 (Red) */}
+                        <ReferenceArea 
+                          y1={150} 
+                          y2={200} 
+                          fill="#EF4444" 
+                          fillOpacity={0.6}
+                          stroke="none"
+                        />
+                        {/* Severe: 201-300 (Purple) */}
+                        <ReferenceArea 
+                          y1={200} 
+                          y2={300} 
+                          fill="#8B5CF6" 
+                          fillOpacity={0.6}
+                          stroke="none"
+                        />
+                        {/* Hazardous: 301+ (Dark Red) */}
+                        <ReferenceArea 
+                          y1={300} 
+                          y2={400} 
+                          fill="#7F1D1D" 
+                          fillOpacity={0.6}
+                          stroke="none"
+                        />
+                        
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(20, 184, 166, 0.2)" />
+                        
+                        <XAxis 
+                          dataKey="time" 
+                          stroke="#9ca3af"
+                          style={{ fontSize: '11px' }}
+                          angle={viewMode === 'weekly' ? -45 : viewMode === 'monthly' ? -45 : 0}
+                          textAnchor={viewMode === 'weekly' ? 'end' : viewMode === 'monthly' ? 'end' : 'middle'}
+                          height={viewMode === 'weekly' ? 70 : viewMode === 'monthly' ? 60 : 40}
+                          interval={viewMode === 'live' ? 4 : viewMode === 'daily' ? 2 : viewMode === 'weekly' ? 0 : viewMode === 'monthly' ? 2 : 0}
+                        />
+                        <YAxis 
+                          stroke="#9ca3af"
+                          style={{ fontSize: '12px' }}
+                          label={{ value: 'AQI', angle: -90, position: 'insideLeft', style: { fill: '#9ca3af' } }}
+                          domain={[0, 400]}
+                          ticks={[0, 50, 100, 150, 200, 300, 400]}
+                        />
+                        <Tooltip 
+                          contentStyle={{ 
+                            backgroundColor: 'rgba(26, 31, 58, 0.95)', 
+                            border: '1px solid rgba(20, 184, 166, 0.4)',
+                            borderRadius: '8px',
+                            color: '#ffffff'
+                          }}
+                          labelStyle={{ color: '#14b8a6', fontWeight: 'bold' }}
+                          formatter={(value) => [`AQI: ${value}`, '']}
+                        />
+                        <Line 
+                          type="monotone" 
+                          dataKey="aqi" 
+                          stroke="#14b8a6"
+                          strokeWidth={2}
+                          dot={{ r: 4, fill: '#14b8a6' }}
+                          activeDot={{ r: 6, fill: '#14b8a6' }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="chart-no-data">
+                      <p>No chart data available</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Time Chart */}
+                {/* <div className="aqi-chart-container">
+                  <div className="chart-header">
+                    <h3 className="chart-title">Time Chart</h3>
+                    <div className="chart-header-right">
+                      <div className="chart-mode-indicator">
+                        {viewMode === 'live' && <span>Last 1 Hour</span>}
+                        {viewMode === 'daily' && <span>Last 24 Hours</span>}
+                        {viewMode === 'weekly' && <span>Last 7 Days</span>}
+                        {viewMode === 'monthly' && <span>Last 30 Days</span>}
+                      </div>
+                      <button 
+                        className="chart-refresh-button"
+                        onClick={handleRefreshTimeChart}
+                        disabled={loadingTimeChart || !showAnalysis}
+                        title="Refresh Time Chart"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
+                          <path d="M21 3v5h-5"></path>
+                          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
+                          <path d="M3 21v-5h5"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  
+                  {loadingTimeChart ? (
+                    <div className="chart-loading">
+                      <div className="loading-spinner"></div>
+                      <p className="loading-message">Please wait, data is loading...</p>
+                    </div>
+                  ) : timeChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <BarChart 
+                        data={timeChartData} 
+                        margin={{ top: 10, right: 30, left: 0, bottom: viewMode === 'weekly' ? 60 : 40 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(20, 184, 166, 0.2)" />
+                        <XAxis 
+                          type="category"
+                          dataKey="day" 
+                          stroke="#9ca3af"
+                          style={{ fontSize: '11px' }}
+                          angle={viewMode === 'weekly' ? -45 : viewMode === 'monthly' ? -45 : 0}
+                          textAnchor={viewMode === 'weekly' ? 'end' : viewMode === 'monthly' ? 'end' : 'middle'}
+                          height={viewMode === 'weekly' ? 70 : viewMode === 'monthly' ? 60 : 40}
+                          interval={viewMode === 'live' ? 4 : viewMode === 'daily' ? 2 : viewMode === 'weekly' ? 0 : viewMode === 'monthly' ? 2 : 0}
+                          label={{ 
+                            value: viewMode === 'live' ? 'Minutes' : viewMode === 'daily' ? 'Hours' : viewMode === 'weekly' ? 'Days' : viewMode === 'monthly' ? 'Days' : 'Hours', 
+                            position: 'insideBottom', 
+                            offset: -5, 
+                            style: { fill: '#9ca3af' } 
+                          }}
+                        />
+                        <YAxis 
+                          type="number"
+                          dataKey="aqi"
+                          stroke="#9ca3af"
+                          style={{ fontSize: '12px' }}
+                          label={{ 
+                            value: 'AQI', 
+                            angle: -90, 
+                            position: 'insideLeft', 
+                            style: { fill: '#9ca3af' } 
+                          }}
+                          domain={[0, 400]}
+                          ticks={[0, 50, 100, 150, 200, 300, 400]}
+                        />
+                        <Tooltip 
+                          contentStyle={{ 
+                            backgroundColor: 'rgba(26, 31, 58, 0.95)', 
+                            border: '1px solid rgba(20, 184, 166, 0.4)',
+                            borderRadius: '8px',
+                            color: '#ffffff'
+                          }}
+                          labelStyle={{ color: '#14b8a6', fontWeight: 'bold' }}
+                          formatter={(value) => [`AQI: ${value}`, '']}
+                          labelFormatter={(label) => {
+                            if (viewMode === 'live') return `Minute: ${label}`
+                            if (viewMode === 'daily') return `Hour: ${label}`
+                            if (viewMode === 'weekly') return `Day: ${label}`
+                            if (viewMode === 'monthly') return `Day: ${label}`
+                            return `Day: ${label}`
+                          }}
+                          content={({ active, payload, label }) => {
+                            if (active && payload && payload.length) {
+                              const data = payload[0].payload
+                              let labelText = ''
+                              if (viewMode === 'live') {
+                                labelText = `Minute: ${label}`
+                              } else if (viewMode === 'daily') {
+                                labelText = `Hour: ${label}`
+                              } else if (viewMode === 'weekly' || viewMode === 'monthly') {
+                                labelText = `Day: ${label}`
+                              } else {
+                                labelText = `Day: ${label}`
+                              }
+                              
+                              return (
+                                <div style={{
+                                  backgroundColor: 'rgba(26, 31, 58, 0.95)',
+                                  border: '1px solid rgba(20, 184, 166, 0.4)',
+                                  borderRadius: '8px',
+                                  padding: '12px',
+                                  color: '#ffffff'
+                                }}>
+                                  <p style={{ margin: '4px 0', color: '#14b8a6' }}>AQI: {data.aqi}</p>
+                                  <p style={{ margin: '4px 0' }}>Time: {data.time}</p>
+                                </div>
+                              )
+                            }
+                            return null
+                          }}
+                        />
+                        <Bar 
+                          dataKey="aqi"
+                          radius={[4, 4, 0, 0]}
+                        >
+                          {timeChartData.map((entry, index) => {
+                            const getAQIColor = (aqi) => {
+                              if (aqi <= 50) return '#10b981' // Green - Excellent
+                              if (aqi <= 100) return '#f59e0b' // Orange - Good
+                              if (aqi <= 150) return '#f97316' // Orange - Fair
+                              if (aqi <= 200) return '#ef4444' // Red - Poor
+                              if (aqi <= 300) return '#8b5cf6' // Purple - Very Poor
+                              return '#7f1d1d' // Dark Red - Hazardous
+                            }
+                            return (
+                              <Cell key={`cell-${index}`} fill={getAQIColor(entry.aqi || 0)} />
+                            )
+                          })}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="chart-no-data">
+                      <p>No time chart data available</p>
+                    </div>
+                  )}
+                </div> */}
+                </>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
+      )}
+    </div>
+  )
+}
+
+export default Dashboard
+
