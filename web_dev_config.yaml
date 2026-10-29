@@ -1,0 +1,7 @@
+# Dev-only proxy for `flutter run -d chrome`, equivalent to the website's
+# Vite proxy (vite.config.js). The backend sends no CORS headers, so browser
+# requests must be same-origin during development.
+server:
+  proxy:
+    - prefix: "/api/"
+      target: "https://climateye-apis.up.railway.app"
