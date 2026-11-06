@@ -75,6 +75,10 @@ flutter:
   assets:
     - assets/images/
     - assets/images/welcome_mountain_lake.jpg
+    - assets/images/aqi_animated_sky_base.jpg
+    - assets/images/aqi_pollutant_sky_bg.jpg
+    - assets/images/aqi_sky_clouds.jpg
+    - assets/images/aqi_sky_foliage.jpg
     - assets/icons/
     - assets/icons/climateeye_logo.jpg
     - assets/videos/

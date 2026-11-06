@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -15,6 +16,7 @@ import '../models/weather.dart';
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
 import '../services/location_service.dart';
+import '../services/map_preferences.dart';
 import '../theme.dart';
 import '../utils/date_utils.dart';
 import '../utils/geo_utils.dart';
@@ -24,6 +26,7 @@ import '../widgets/dark_osm_tiles.dart';
 import '../widgets/forecast_timeline_strip.dart';
 import '../widgets/glass.dart';
 import '../widgets/home_aqi_dashboard.dart';
+import '../widgets/map_backed_route.dart';
 import '../widgets/near_you_panel.dart';
 import '../widgets/overview_cards.dart';
 import '../widgets/weather_info_card.dart';
@@ -48,7 +51,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   /// Shown only when the device location is unavailable; never labelled as GPS.
   static const _defaultCenter = LatLng(20.5937, 78.9629);
   /// Street-level close-up (~2–3 blocks, buildings/POIs), matching Screenshot 1.
-  static const _gpsZoom = 17.5;
+  /// Neighbourhood scale: entire ~140 m AQI radius + nearby roads stay visible.
+  static const _gpsZoom = 16.8;
   AnimationController? _gpsZoomAnim;
   final _center = ValueNotifier<LatLng>(_defaultCenter);
   LatLng? _gps;
@@ -58,12 +62,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   /// Prevents re-entrant [MapController.move] while snapping home centre to GPS.
   bool _lockingHomeCenter = false;
   int _openLocateRequest = 0;
+  bool _subscreenActive = false;
 
   /// Live AQI at [_locAqiFor], read exactly as the Live overview reads /aqi.
   LatLng? _locAqiFor;
   AqiRecord? _locAqi;
   String? _locAqiError;
   String? _locPlace;
+  bool _locPlaceLoading = false;
+  int _locPlaceRequest = 0;
   bool _locAqiLoading = false;
   bool _locCardOpen = false;
   int _locAqiRequest = 0;
@@ -84,7 +91,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   bool _searching = false;
   int _searchRequest = 0;
 
-  /// false = dark free OSM (default home basemap); true = satellite.
+  /// false = OSM (default on launch); true = satellite with natural green treatment (Design 3).
   bool _satellite = false;
 
   // Weather mode controls & forecast timeline
@@ -150,6 +157,26 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   @override
+  void initState() {
+    super.initState();
+    MapPreferences.loadIsSatellite().then((val) {
+      if (mounted && val != _satellite) {
+        setState(() => _satellite = val);
+      }
+    });
+  }
+
+  void _setSatellite(bool value) {
+    if (_satellite == value) return;
+    setState(() => _satellite = value);
+    MapPreferences.saveIsSatellite(value);
+  }
+
+  void _toggleSatellite() {
+    _setSatellite(!_satellite);
+  }
+
+  @override
   void dispose() {
     _gpsZoomAnim?.dispose();
     _center.dispose();
@@ -169,7 +196,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     setState(() {
       _openLocating = false;
       _openLocationFailed = pos == null;
-      if (pos != null) _gps = pos;
+      if (pos != null) {
+        _gps = pos;
+      }
     });
     if (pos != null) {
       final untouched = !_mapMovedByUser && _geometry == null;
@@ -203,9 +232,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       _locAqiError = null;
       _locAqiLoading = true;
     });
-    _api.fetchPlaceName(pos.latitude, pos.longitude).then((name) {
-      if (mounted && request == _locAqiRequest) setState(() => _locPlace = name);
-    });
+    // Resolve place name independently so the badge can load / fall back
+    // without waiting on /aqi.
+    unawaited(_resolvePlaceName(pos));
     try {
       final record = AqiRecord.fromJson(await _api.fetchAqi(pos.latitude, pos.longitude));
       if (!mounted || request != _locAqiRequest) return;
@@ -216,6 +245,26 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     } finally {
       if (mounted && request == _locAqiRequest) setState(() => _locAqiLoading = false);
     }
+  }
+
+  Future<void> _resolvePlaceName(LatLng pos) async {
+    final request = ++_locPlaceRequest;
+    if (mounted) {
+      setState(() {
+        _locPlaceLoading = true;
+      });
+    }
+    String? name;
+    try {
+      name = await _api.fetchPlaceName(pos.latitude, pos.longitude);
+    } catch (_) {
+      name = null;
+    }
+    if (!mounted || request != _locPlaceRequest) return;
+    setState(() {
+      _locPlace = (name != null && name.trim().isNotEmpty) ? name.trim() : null;
+      _locPlaceLoading = false;
+    });
   }
 
   Future<void> _loadLocationWeather(LatLng pos, [DateTime? date]) async {
@@ -537,20 +586,25 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _moveToGps(_gps!);
   }
 
-  void _openHomeAqiDetails(HomeAqiDetailsMode mode) {
+  Future<void> _openHomeAqiDetails(HomeAqiDetailsMode mode) async {
     final gps = _gps;
     if (gps == null) return;
-    Navigator.of(context).push(
-      MaterialPageRoute(
+    setState(() => _subscreenActive = true);
+    await Navigator.of(context).push(
+      MapBackedPageRoute(
         builder: (_) => HomeAqiDetailsScreen(
           latitude: gps.latitude,
           longitude: gps.longitude,
           mode: mode,
           initialRecord: _locAqi,
           placeName: _locPlace,
+          isSatellite: _satellite,
         ),
       ),
     );
+    if (mounted) {
+      setState(() => _subscreenActive = false);
+    }
   }
 
   void _startDrawing() {
@@ -842,6 +896,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         final collapsedH = wide ? _collapsedH : 46.0;
         final showAdvancedPanels = !_homeFetching && !_homeDashboard;
         final bottomNavH = 60.0 + mq.padding.bottom + (_weatherMode != WeatherOverlayMode.none ? 44.0 : 0.0);
+        if (_subscreenActive) {
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(child: _mapView()),
+            ],
+          );
+        }
         return Stack(children: [
           Positioned.fill(child: _mapView()),
           Positioned.fill(
@@ -911,13 +973,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               right: 12,
               child: _mapControls(wide: wide, legendFits: false),
             ),
-          // Themed GPS locating indicator (no wide "Fetching location…" banner).
+          // GPS resolving: subtle cyan pulse at map centre — no loading text.
           if (_homeFetching && !_openLocationFailed)
             const Positioned.fill(
               child: IgnorePointer(
                 child: Center(child: HomeGpsLocatingIndicator()),
               ),
             ),
+          // Permission / GPS failure: silent until user taps retry (no banner copy).
           if (_homeFetching && _openLocationFailed)
             Positioned(
               left: 16,
@@ -933,32 +996,40 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           // after AQI loads. Gauge taps open a separate details page.
           if (_homeDashboard) ...[
             Positioned.fill(
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Location name sits above the gauge / outside the blue ring.
-                    if (_locPlace != null && _locPlace!.isNotEmpty) ...[
-                      HomeLocationNameChip(name: _locPlace!),
-                      const SizedBox(height: 12),
-                    ],
-                    HomeAqiGauge(
-                      aqi: _locAqi?.aqi,
-                      category: _locAqi?.aqi != null
-                          ? aqiCategory(_locAqi!.aqi!)
-                          : null,
-                      loading: _locAqiLoading,
-                      error: _locAqiError,
-                      onRetry:
-                          _gps == null ? null : () => _loadLocationAqi(_gps!),
-                      onTap: _locAqi == null
-                          ? null
-                          : () =>
-                              _openHomeAqiDetails(HomeAqiDetailsMode.overview),
-                      size: 150,
+              child: Stack(
+                alignment: Alignment.center,
+                clipBehavior: Clip.none,
+                children: [
+                  HomeAqiGauge(
+                    aqi: _locAqi?.aqi,
+                    category: _locAqi?.aqi != null
+                        ? aqiCategory(_locAqi!.aqi!)
+                        : null,
+                    loading: _locAqiLoading,
+                    error: _locAqiError,
+                    onRetry:
+                        _gps == null ? null : () => _loadLocationAqi(_gps!),
+                    onTap: _locAqi == null
+                        ? null
+                        : () =>
+                            _openHomeAqiDetails(HomeAqiDetailsMode.overview),
+                    size: 150,
+                  ),
+                  // Above AQI radius: pulse while geocoding, then floating label.
+                  Transform.translate(
+                    offset: const Offset(0, -178),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 56),
+                      child: IgnorePointer(
+                        child: _locPlaceLoading
+                            ? const HomeGpsLocatingIndicator(size: 72)
+                            : (_locPlace != null && _locPlace!.isNotEmpty
+                                ? HomeLocationNameChip(name: _locPlace!)
+                                : const SizedBox.shrink()),
+                      ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
             if (_locAqi != null && !_locAqiLoading)
@@ -968,6 +1039,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 bottom: mq.padding.bottom + 16,
                 child: Center(
                   child: HomeHistoryPredictionBar(
+                    selectedMode: 'history',
+                    accentColor: const Color(0xFF02A78D),
                     onHistory: () =>
                         _openHomeAqiDetails(HomeAqiDetailsMode.history),
                     onPrediction: () =>
@@ -1315,23 +1388,27 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           },
         ),
       children: [
-        // Basemap only — ColorFiltered wraps dark OSM tiles, never markers.
-        if (_satellite)
+        // Basemap: Satellite with natural green treatment (Design 3) or natural light OSM.
+        if (_satellite) ...[
+          ColorFiltered(
+            colorFilter: const ColorFilter.mode(
+              Color(0x280D4720),
+              BlendMode.color,
+            ),
+            child: TileLayer(
+              urlTemplate: TileUrls.satellite,
+              userAgentPackageName: 'com.climateeye.climateeye',
+            ),
+          ),
           TileLayer(
-            urlTemplate: TileUrls.satellite,
+            urlTemplate: TileUrls.labels,
             userAgentPackageName: 'com.climateeye.climateeye',
-          )
-        else
+          ),
+        ] else
           const LightOsmTileLayer(),
         if (tiles?.tileUrl != null && _showMethaneOverlay)
           TileLayer(
             urlTemplate: tiles!.tileUrl!,
-            userAgentPackageName: 'com.climateeye.climateeye',
-          ),
-        // Light ArcGIS labels only on satellite; they clash with inverted OSM.
-        if (_satellite)
-          TileLayer(
-            urlTemplate: TileUrls.labels,
             userAgentPackageName: 'com.climateeye.climateeye',
           ),
         ...WeatherMapOverlay.buildLayers(
@@ -1388,19 +1465,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           ]),
         ],
         if (_gps != null && !_isDrawing) ...[
-          // Soft accuracy / highlight ring for Design 5 (outside tile filter).
-          CircleLayer(
-            circles: [
-              CircleMarker(
-                point: _gps!,
-                radius: 140,
-                useRadiusInMeter: true,
-                color: const Color(0xFF3B82F6).withValues(alpha: 0.14),
-                borderColor: const Color(0xFF3B82F6).withValues(alpha: 0.7),
-                borderStrokeWidth: 2,
-              ),
-            ],
-          ),
           if (_showNearYouCard)
             CircleLayer(
               circles: [
@@ -1596,7 +1660,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       is3d: _is3dMode,
       onToggle3d: _toggle3dMode,
       isSatellite: _satellite,
-      onToggleMap: () => setState(() => _satellite = !_satellite),
+      onToggleMap: _toggleSatellite,
       compact: compact,
     );
     final account = GlassIconButton(
@@ -2238,8 +2302,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Widget _mapControls({required bool wide, required bool legendFits}) {
     final tiles = _methaneTiles;
     final aqiLegendOpen = legendFits && (_aqiLegendOpen ?? wide);
-    final btnSize = wide ? 44.0 : 40.0;
-    final iconSize = wide ? 21.0 : 19.0;
+    // ~12% smaller than prior 44/40 — still ≥36 for comfortable taps.
+    final btnSize = wide ? 38.0 : 34.0;
+    final iconSize = wide ? 18.0 : 16.5;
+    const gap = 8.0;
 
     return Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
       GlassPanel(
@@ -2252,18 +2318,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             borderRadius: BorderRadius.circular(14),
             side: const BorderSide(color: AppColors.border),
           ),
-          onSelected: (v) => setState(() {
+          onSelected: (v) {
             switch (v) {
               case 'satellite':
-                _satellite = true;
+                _setSatellite(true);
               case 'map':
-                _satellite = false;
+                _setSatellite(false);
               case 'methane':
-                _showMethaneOverlay = !_showMethaneOverlay;
+                setState(() => _showMethaneOverlay = !_showMethaneOverlay);
               case 'plumes':
-                _showPlumes = !_showPlumes;
+                setState(() => _showPlumes = !_showPlumes);
             }
-          }),
+          },
           itemBuilder: (_) => [
             _layerItem('map', 'Light map (OSM)', Icons.map_outlined, !_satellite),
             _layerItem('satellite', 'Satellite', Icons.satellite_alt_outlined, _satellite),
@@ -2281,14 +2347,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           ),
         ),
       ),
-      const SizedBox(height: 10),
+      const SizedBox(height: gap),
       GlassIconButton(
         icon: Icons.navigation_outlined,
         tooltip: _gps != null ? 'Centre on my GPS location' : 'Find my location',
         size: btnSize,
         onPressed: _openLocating ? null : _recenter,
       ),
-      const SizedBox(height: 10),
+      const SizedBox(height: gap),
       GlassPanel(
         radius: btnSize / 2,
         child: Material(
@@ -2319,7 +2385,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         ),
       ),
       if (tiles != null) ...[
-        const SizedBox(height: 10),
+        const SizedBox(height: gap),
         _legendOpen
             ? _legend(tiles.legend)
             : GlassIconButton(
@@ -2329,7 +2395,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 onPressed: () => setState(() => _legendOpen = true),
               ),
       ],
-      const SizedBox(height: 10),
+      const SizedBox(height: gap),
       aqiLegendOpen
           ? _aqiLegend()
           : GlassIconButton(

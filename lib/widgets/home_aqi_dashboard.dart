@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -8,17 +7,14 @@ import 'dark_osm_tiles.dart';
 
 /// Shared light glass surface for the Design 1 / Design 5 home chrome.
 class LightGlassSurface {
+  /// 0% opacity background so the map stays completely visible underneath.
   static BoxDecoration card({double radius = 18, Color? border}) => BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.78),
+        color: Colors.transparent,
         borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: border ?? LightOsmTileLayer.accent.withValues(alpha: 0.28)),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF0F172A).withValues(alpha: 0.08),
-            blurRadius: 18,
-            offset: const Offset(0, 6),
-          ),
-        ],
+        border: Border.all(
+          color: border ?? Colors.white.withValues(alpha: 0.55),
+          width: 1.1,
+        ),
       );
 }
 
@@ -32,9 +28,12 @@ const kHomePollutantFields = <(String, String, String)>[
   ('co', 'CO', 'ppm'),
 ];
 
-/// Compact themed GPS locating indicator (replaces the old wide fetch banner).
+/// Subtle cyan location pulse at map centre while GPS / place resolve.
+/// No loading text — map stays visible and interactive underneath.
 class HomeGpsLocatingIndicator extends StatefulWidget {
-  const HomeGpsLocatingIndicator({super.key});
+  const HomeGpsLocatingIndicator({super.key, this.size = 120});
+
+  final double size;
 
   @override
   State<HomeGpsLocatingIndicator> createState() =>
@@ -44,16 +43,14 @@ class HomeGpsLocatingIndicator extends StatefulWidget {
 class _HomeGpsLocatingIndicatorState extends State<HomeGpsLocatingIndicator>
     with SingleTickerProviderStateMixin {
   late final AnimationController _pulse;
-  late final Animation<double> _curve;
 
   @override
   void initState() {
     super.initState();
     _pulse = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat(reverse: true);
-    _curve = CurvedAnimation(parent: _pulse, curve: Curves.easeInOut);
+      duration: const Duration(milliseconds: 2200),
+    )..repeat();
   }
 
   @override
@@ -64,55 +61,48 @@ class _HomeGpsLocatingIndicatorState extends State<HomeGpsLocatingIndicator>
 
   @override
   Widget build(BuildContext context) {
+    final cyan = LightOsmTileLayer.accent;
     return AnimatedBuilder(
-      animation: _curve,
+      animation: _pulse,
       builder: (context, _) {
-        final t = _curve.value;
-        final ring = 42.0 + (t * 14);
+        final s = widget.size;
         return SizedBox(
-          width: 88,
-          height: 88,
+          width: s,
+          height: s,
           child: Stack(
             alignment: Alignment.center,
             children: [
-              // Soft pulse rings
+              // Soft core glow.
               Container(
-                width: ring,
-                height: ring,
+                width: 22,
+                height: 22,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: LightOsmTileLayer.accent
-                      .withValues(alpha: 0.14 * (1 - t * 0.35)),
-                  border: Border.all(
-                    color: LightOsmTileLayer.accent
-                        .withValues(alpha: 0.35 * (1 - t * 0.4)),
-                    width: 1.5,
-                  ),
-                ),
-              ),
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withValues(alpha: 0.92),
-                  border: Border.all(
-                    color: LightOsmTileLayer.accent.withValues(alpha: 0.28),
-                  ),
+                  color: cyan.withValues(alpha: 0.22),
                   boxShadow: [
                     BoxShadow(
-                      color: LightOsmTileLayer.accent
-                          .withValues(alpha: 0.22 + t * 0.18),
-                      blurRadius: 12 + t * 8,
-                      spreadRadius: 0.5,
+                      color: cyan.withValues(alpha: 0.35),
+                      blurRadius: 14,
+                      spreadRadius: 2,
                     ),
                   ],
                 ),
-                child: Icon(
-                  Icons.location_on_rounded,
-                  size: 26 + t * 2,
-                  color: LightOsmTileLayer.accent,
-                ),
+              ),
+              // Compact pin — clean location marker without decorative outer rings.
+              Icon(
+                Icons.location_on_rounded,
+                size: 28,
+                color: cyan,
+                shadows: [
+                  Shadow(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    blurRadius: 8,
+                  ),
+                  Shadow(
+                    color: cyan.withValues(alpha: 0.45),
+                    blurRadius: 10,
+                  ),
+                ],
               ),
             ],
           ),
@@ -172,6 +162,7 @@ class HomeAqiGauge extends StatefulWidget {
     this.onRetry,
     this.onTap,
     this.size = 150,
+    this.cardStyle = false,
   });
 
   final double? aqi;
@@ -181,6 +172,7 @@ class HomeAqiGauge extends StatefulWidget {
   final VoidCallback? onRetry;
   final VoidCallback? onTap;
   final double size;
+  final bool cardStyle;
 
   @override
   State<HomeAqiGauge> createState() => _HomeAqiGaugeState();
@@ -197,7 +189,10 @@ class _HomeAqiGaugeState extends State<HomeAqiGauge>
     _pulse = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1600),
-    )..repeat(reverse: true);
+    );
+    if (!widget.cardStyle) {
+      _pulse.repeat(reverse: true);
+    }
     _pulseCurve = CurvedAnimation(parent: _pulse, curve: Curves.easeInOut);
   }
 
@@ -208,150 +203,153 @@ class _HomeAqiGaugeState extends State<HomeAqiGauge>
   }
 
   bool get _pulseActive =>
-      !widget.loading && widget.error == null && widget.aqi != null;
+      !widget.cardStyle && !widget.loading && widget.error == null && widget.aqi != null;
 
   @override
   Widget build(BuildContext context) {
+    if (widget.cardStyle) {
+      final aqiVal = widget.aqi;
+      final fraction = aqiVal == null
+          ? 0.35
+          : (aqiVal / 250.0).clamp(0.04, 1.0);
+      final size = widget.size;
+
+      return SizedBox(
+        width: size,
+        height: size,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            CustomPaint(
+              size: Size(size, size),
+              painter: _AqiCardArcPainter(fraction: fraction),
+            ),
+            Container(
+              width: size * 0.76,
+              height: size * 0.76,
+              padding: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: Center(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text(
+                        'AQI',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF64748B),
+                          letterSpacing: 0.5,
+                          height: 1.0,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        widget.aqi == null ? '—' : '${widget.aqi!.round()}',
+                        style: TextStyle(
+                          fontSize: size * 0.24,
+                          fontWeight: FontWeight.w900,
+                          color: const Color(0xFF0F172A),
+                          height: 1.0,
+                        ),
+                      ),
+                      if (widget.category != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.category!.label,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: widget.category!.color,
+                            height: 1.0,
+                          ),
+                        ),
+                        Container(
+                          width: 34,
+                          height: 1.5,
+                          margin: const EdgeInsets.only(top: 3),
+                          color: const Color(0xFFE2E8F0),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     final color = widget.category?.color ?? LightOsmTileLayer.accent;
     final fraction = widget.aqi == null
         ? 0.0
         : (aqiGaugeAngle(widget.aqi!) / 180).clamp(0.0, 1.0);
     final size = widget.size;
+    // Fixed square: geometric centre of rings/gauge == widget centre
+    final frame = size * 1.55;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        GestureDetector(
-          onTap: widget.loading
-              ? null
-              : (widget.error != null ? widget.onRetry : widget.onTap),
-          child: AnimatedBuilder(
-            animation: _pulseCurve,
-            builder: (context, child) {
-              final t = _pulseActive ? _pulseCurve.value : 0.0;
-              final scale = 1.0 + (t * 0.06);
-              final glow = 0.32 + (t * 0.38);
-              final beam = size * (1.08 + t * 0.42);
-              return SizedBox(
-                width: size * 1.55,
-                height: size * 1.55,
-                child: Stack(
+    return SizedBox(
+      width: frame,
+      height: frame,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          GestureDetector(
+            onTap: widget.loading
+                ? null
+                : (widget.error != null ? widget.onRetry : widget.onTap),
+            child: AnimatedBuilder(
+              animation: _pulseCurve,
+              builder: (context, child) {
+                final t = _pulseActive ? _pulseCurve.value : 0.0;
+                final scale = 1.0 + (t * 0.04);
+                return Transform.scale(
+                  scale: scale,
                   alignment: Alignment.center,
-                  children: [
-                    // Expanding beam ring
-                    Opacity(
-                      opacity: _pulseActive ? (1.0 - t) * 0.55 : 0,
-                      child: Container(
-                        width: beam,
-                        height: beam,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: color.withValues(alpha: 0.65),
-                            width: 2.5,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: color.withValues(alpha: 0.35 * (1 - t)),
-                              blurRadius: 18,
-                              spreadRadius: 2,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    // Soft halo
-                    Container(
-                      width: size * (1.12 + t * 0.1),
-                      height: size * (1.12 + t * 0.1),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: color.withValues(alpha: 0.12 + t * 0.14),
-                      ),
-                    ),
-                    Transform.scale(
-                      scale: scale,
-                      child: Container(
-                        width: size,
-                        height: size,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: color.withValues(alpha: glow),
-                              blurRadius: 28 + (t * 26),
-                              spreadRadius: 2 + (t * 8),
-                            ),
-                            BoxShadow(
-                              color: color.withValues(alpha: 0.25 + t * 0.2),
-                              blurRadius: 48 + (t * 20),
-                              spreadRadius: 0,
-                            ),
-                            BoxShadow(
-                              color:
-                                  const Color(0xFF0F172A).withValues(alpha: 0.1),
-                              blurRadius: 20,
-                              offset: const Offset(0, 8),
-                            ),
-                          ],
-                        ),
-                        child: child,
-                      ),
-                    ),
-                  ],
+                  child: SizedBox(
+                    width: size,
+                    height: size,
+                    child: child,
+                  ),
+                );
+              },
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  // 0% background fill opacity so map shows through.
+                  color: Colors.transparent,
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    width: 1.5,
+                  ),
                 ),
-              );
-            },
-            child: ClipOval(
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                child: Container(
-                  width: size,
-                  height: size,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Colors.white.withValues(alpha: 0.88),
-                        const Color(0xFFE0F7F4).withValues(alpha: 0.72),
-                      ],
-                    ),
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.9),
-                      width: 1.5,
-                    ),
-                  ),
-                  child: CustomPaint(
-                    painter: _HomeRingPainter(fraction: fraction, color: color),
-                    child: Center(child: _gaugeBody(size)),
-                  ),
+                child: CustomPaint(
+                  painter:
+                      _HomeRingPainter(fraction: fraction, color: color),
+                  child: Center(child: _gaugeBody(size)),
                 ),
               ),
             ),
           ),
-        ),
-        if (widget.category != null &&
-            !widget.loading &&
-            widget.error == null) ...[
-          const SizedBox(height: 8),
-          Text(
-            widget.category!.label,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF0F172A),
-              shadows: [
-                Shadow(
-                  color: Color(0xE6FFFFFF),
-                  blurRadius: 8,
-                ),
-              ],
-            ),
-          ),
         ],
-      ],
+      ),
     );
   }
 
@@ -369,128 +367,183 @@ class _HomeAqiGaugeState extends State<HomeAqiGauge>
         const Icon(Icons.cloud_off_outlined,
             color: Color(0xFF64748B), size: 28),
         const SizedBox(height: 6),
-        const Text('AQI unavailable',
+        Text('AQI unavailable',
             style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: Color(0xFF0F172A))),
+                color: const Color(0xFF0F172A),
+                shadows: [
+                  Shadow(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      blurRadius: 6),
+                ])),
         if (widget.onRetry != null)
           const Text('Tap to retry',
               style: TextStyle(
                   fontSize: 11, color: LightOsmTileLayer.accent)),
       ]);
     }
+    // Design 3: Exact hierarchy inside gauge disc:
+    // 144
+    // AQI
+    // Poor
+    // Tap for details
     return Column(mainAxisSize: MainAxisSize.min, children: [
       Text(
         widget.aqi == null ? '—' : '${widget.aqi!.round()}',
         style: TextStyle(
           fontSize: size * 0.28,
-          fontWeight: FontWeight.w800,
+          fontWeight: FontWeight.w900,
           color: const Color(0xFF0F172A),
-          height: 1,
+          height: 1.0,
         ),
       ),
-      const Text('AQI',
-          style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF64748B))),
-      if (widget.onTap != null) ...[
+      const SizedBox(height: 3),
+      const Text(
+        'AQI',
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: Color(0xFF475569),
+          letterSpacing: 0.2,
+          height: 1.0,
+        ),
+      ),
+      if (widget.category != null) ...[
         const SizedBox(height: 2),
-        Text('Tap for details',
-            style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                color: LightOsmTileLayer.accent.withValues(alpha: 0.85))),
+        Text(
+          widget.category!.label,
+          style: const TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF0F172A),
+            height: 1.1,
+          ),
+        ),
+      ],
+      if (widget.onTap != null) ...[
+        const SizedBox(height: 3),
+        const Text(
+          'Tap for details',
+          style: TextStyle(
+            fontSize: 9.5,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF0D9488),
+            letterSpacing: 0.1,
+          ),
+        ),
       ],
     ]);
   }
 }
 
-/// Floating place-name chip shown outside the GPS / AQI circle.
+/// Floating location label — pin + city/state text (Design 3 style).
 class HomeLocationNameChip extends StatelessWidget {
-  const HomeLocationNameChip({super.key, required this.name});
+  const HomeLocationNameChip({
+    super.key,
+    required this.name,
+  });
 
   final String name;
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 280),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: LightGlassSurface.card(radius: 16),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.place_outlined,
-                  size: 16, color: LightOsmTileLayer.accent),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF0F172A),
-                  ),
-                ),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 320),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.location_on_rounded,
+            size: 20,
+            color: const Color(0xFF0D9488),
+            shadows: [
+              Shadow(
+                color: Colors.black.withValues(alpha: 0.6),
+                blurRadius: 8,
               ),
             ],
           ),
-        ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.1,
+                color: Colors.white,
+                height: 1.15,
+                shadows: [
+                  Shadow(
+                    color: Colors.black.withValues(alpha: 0.8),
+                    blurRadius: 10,
+                    offset: const Offset(0, 1),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
 /// Compact History | Prediction control for the map bottom overlay.
+/// In Design 3 (Satellite - Green), History is selected with a lush green accent.
 class HomeHistoryPredictionBar extends StatelessWidget {
   const HomeHistoryPredictionBar({
     super.key,
     required this.onHistory,
     required this.onPrediction,
+    this.selectedMode = 'history',
+    this.accentColor = const Color(0xFF0D5E34),
   });
 
   final VoidCallback onHistory;
   final VoidCallback onPrediction;
+  final String selectedMode;
+  final Color accentColor;
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(22),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 420),
-          padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
-          decoration: LightGlassSurface.card(radius: 22),
-          child: Row(
-            children: [
-              Expanded(
-                child: _SegButton(
-                  label: 'History',
-                  icon: Icons.history_rounded,
-                  onTap: onHistory,
-                  filled: true,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _SegButton(
-                  label: 'Prediction',
-                  icon: Icons.timeline_rounded,
-                  onTap: onPrediction,
-                ),
-              ),
-            ],
-          ),
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 420),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.55),
+          width: 1.2,
         ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _SegButton(
+              label: 'History',
+              icon: Icons.history_rounded,
+              onTap: onHistory,
+              filled: selectedMode == 'history',
+              accentColor: accentColor,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _SegButton(
+              label: 'Prediction',
+              icon: Icons.timeline_rounded,
+              onTap: onPrediction,
+              filled: selectedMode == 'prediction',
+              accentColor: accentColor,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -502,26 +555,27 @@ class _SegButton extends StatelessWidget {
     required this.icon,
     required this.onTap,
     this.filled = false,
+    this.accentColor = const Color(0xFF02A78D),
   });
 
   final String label;
   final IconData icon;
   final VoidCallback onTap;
   final bool filled;
+  final Color accentColor;
 
   @override
   Widget build(BuildContext context) {
-    final bg = filled
-        ? LightOsmTileLayer.accent
-        : const Color(0xFF0F172A).withValues(alpha: 0.06);
-    final fg = filled ? Colors.white : const Color(0xFF0F172A);
+    // Solid accent for selected state; 0% opacity for unselected.
+    final bg = filled ? accentColor : Colors.transparent;
+    final fg = Colors.white;
 
     return Material(
       color: bg,
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(16),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
           child: Row(
@@ -535,6 +589,12 @@ class _SegButton extends StatelessWidget {
                   fontSize: 14,
                   fontWeight: FontWeight.w700,
                   color: fg,
+                  shadows: const [
+                    Shadow(
+                      color: Colors.black87,
+                      blurRadius: 4,
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -649,6 +709,61 @@ class HomeAqiDashboard extends StatelessWidget {
   }
 }
 
+class _AqiCardArcPainter extends CustomPainter {
+  _AqiCardArcPainter({required this.fraction});
+  final double fraction;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = size.width * 0.085;
+    final radius = (size.width - stroke) / 2;
+    final center = size.center(Offset.zero);
+    final rect = Rect.fromCircle(center: center, radius: radius);
+
+    // Sweep from 135 deg (bottom-left) around top to 45 deg (bottom-right) => 270 deg
+    const startAngle = 135 * (math.pi / 180);
+    const totalSweep = 270 * (math.pi / 180);
+
+    // 1. Background track: subtle grey arc
+    final trackPaint = Paint()
+      ..color = const Color(0xFFE2E8F0).withValues(alpha: 0.8)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawArc(rect, startAngle, totalSweep, false, trackPaint);
+
+    if (fraction <= 0) return;
+
+    // 2. Active progress arc: multi-color gradient
+    // Green (Good) -> Yellow (Moderate) -> Orange (Poor) -> Red (Unhealthy)
+    final activeSweep = totalSweep * fraction.clamp(0.02, 1.0);
+    final gradient = SweepGradient(
+      startAngle: startAngle,
+      endAngle: startAngle + totalSweep,
+      colors: const [
+        Color(0xFF22C55E), // Green
+        Color(0xFFEAB308), // Yellow
+        Color(0xFFF97316), // Orange
+        Color(0xFFEF4444), // Red
+      ],
+      stops: const [0.0, 0.33, 0.66, 1.0],
+    );
+
+    final activePaint = Paint()
+      ..shader = gradient.createShader(rect)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawArc(rect, startAngle, activeSweep, false, activePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _AqiCardArcPainter oldDelegate) =>
+      oldDelegate.fraction != fraction;
+}
+
 class _HomeRingPainter extends CustomPainter {
   _HomeRingPainter({required this.fraction, required this.color});
   final double fraction;
@@ -682,11 +797,7 @@ class _HomeRingPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
         ..strokeWidth = stroke
-        ..shader = SweepGradient(
-          startAngle: start,
-          endAngle: start + math.pi * 2,
-          colors: [color.withValues(alpha: 0.55), color],
-        ).createShader(rect),
+        ..color = color,
     );
   }
 
@@ -785,20 +896,16 @@ class _PollutantChip extends StatelessWidget {
         ? '—'
         : value!.toStringAsFixed(value!.abs() >= 100 ? 0 : 1);
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-        child: Container(
-          width: double.infinity,
-          padding: EdgeInsets.fromLTRB(
-            compact ? 8 : 10,
-            compact ? 8 : 10,
-            compact ? 8 : 10,
-            compact ? 7 : 9,
-          ),
-          decoration: LightGlassSurface.card(radius: 14),
-          child: Column(
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.fromLTRB(
+        compact ? 8 : 10,
+        compact ? 8 : 10,
+        compact ? 8 : 10,
+        compact ? 7 : 9,
+      ),
+      decoration: LightGlassSurface.card(radius: 14),
+      child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -835,8 +942,6 @@ class _PollutantChip extends StatelessWidget {
               ),
             ],
           ),
-        ),
-      ),
-    );
+        );
   }
 }

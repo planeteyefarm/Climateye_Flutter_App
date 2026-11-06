@@ -23,7 +23,16 @@ class ApiConfig {
   static const String methaneTiles = '/methane/tiles';
   static const String buildings = '/buildings';
 
+  /// Forward place search (map search bar).
   static const String geocoding = 'https://geocoding-api.open-meteo.com/v1/search';
+
+  /// Browser-friendly reverse geocode (city + state from lat/lng).
+  static const String reverseGeocode =
+      'https://api.bigdatacloud.net/data/reverse-geocode-client';
+
+  /// OSM Nominatim reverse geocode (fallback when BigDataCloud fails).
+  static const String nominatimReverse =
+      'https://nominatim.openstreetmap.org/reverse';
 
   static const Duration timeout = Duration(seconds: 60);
 }

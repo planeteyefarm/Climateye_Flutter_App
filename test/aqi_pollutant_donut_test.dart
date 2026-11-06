@@ -73,4 +73,13 @@ void main() {
     }
     expect(find.textContaining('Air quality is'), findsOneWidget);
   });
+
+  test('flatColorForPollutant maps all 6 pollutants to professional palette', () {
+    expect(flatColorForPollutant('pm2_5'), const Color(0xFFEF4444)); // red
+    expect(flatColorForPollutant('pm10'), const Color(0xFFF97316));  // orange
+    expect(flatColorForPollutant('no2'), const Color(0xFFF59E0B));   // amber
+    expect(flatColorForPollutant('so2'), const Color(0xFF14B8A6));   // teal
+    expect(flatColorForPollutant('o3'), const Color(0xFF3B82F6));    // muted blue
+    expect(flatColorForPollutant('co'), const Color(0xFFD4C5A9));    // beige
+  });
 }

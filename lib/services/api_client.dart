@@ -316,22 +316,102 @@ class ApiClient {
     );
   }
 
-  /// Reverse place-name lookup used by the weather cards (handover §3.9).
+  /// Reverse place-name lookup → `"City, State"` (or city alone).
+  ///
+  /// Open-Meteo `/v1/search` is forward-only and often returns nothing for
+  /// lat/lng, which left the map badge blank. Resolve via BigDataCloud
+  /// (CORS-friendly), then Nominatim, then a best-effort Open-Meteo probe.
   Future<String?> fetchPlaceName(double lat, double lng) async {
+    final fromBigData = await _reverseViaBigDataCloud(lat, lng);
+    if (fromBigData != null) return fromBigData;
+    final fromNominatim = await _reverseViaNominatim(lat, lng);
+    if (fromNominatim != null) return fromNominatim;
+    return _reverseViaOpenMeteoSearch(lat, lng);
+  }
+
+  Future<String?> _reverseViaBigDataCloud(double lat, double lng) async {
     try {
-      // Built by hand: Uri.replace() encodes an empty value as `name` without
-      // `=`, which Open-Meteo rejects with HTTP 400.
+      final uri = Uri.parse(ApiConfig.reverseGeocode).replace(queryParameters: {
+        'latitude': lat.toString(),
+        'longitude': lng.toString(),
+        'localityLanguage': 'en',
+      });
+      final res = await _client.get(uri).timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) return null;
+      final data = jsonDecode(res.body);
+      if (data is! Map) return null;
+      return _composePlaceName(
+        city: data['city']?.toString() ?? data['locality']?.toString(),
+        state: data['principalSubdivision']?.toString(),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> _reverseViaNominatim(double lat, double lng) async {
+    try {
+      final uri = Uri.parse(ApiConfig.nominatimReverse).replace(queryParameters: {
+        'lat': lat.toString(),
+        'lon': lng.toString(),
+        'format': 'json',
+        'zoom': '10',
+        'addressdetails': '1',
+      });
+      final res = await _client
+          .get(uri, headers: const {
+            // Nominatim requires a valid identifying User-Agent.
+            'User-Agent': 'ClimateEye/1.0 (https://climateye-apis.up.railway.app)',
+            'Accept-Language': 'en',
+          })
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) return null;
+      final data = jsonDecode(res.body);
+      if (data is! Map) return null;
+      final address = data['address'];
+      if (address is! Map) return null;
+      final city = address['city']?.toString() ??
+          address['town']?.toString() ??
+          address['village']?.toString() ??
+          address['municipality']?.toString() ??
+          address['county']?.toString();
+      final state = address['state']?.toString();
+      return _composePlaceName(city: city, state: state);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> _reverseViaOpenMeteoSearch(double lat, double lng) async {
+    try {
+      // Last-resort probe; Open-Meteo search is not a true reverse geocoder.
       final uri = Uri.parse(
           '${ApiConfig.geocoding}?name=&latitude=$lat&longitude=$lng&count=1');
-      final res = await _client.get(uri).timeout(const Duration(seconds: 15));
+      final res = await _client.get(uri).timeout(const Duration(seconds: 12));
       if (res.statusCode != 200) return null;
       final data = jsonDecode(res.body);
       final results = data is Map ? data['results'] : null;
       if (results is List && results.isNotEmpty && results.first is Map) {
-        return results.first['name']?.toString();
+        final r = results.first as Map;
+        return _composePlaceName(
+          city: r['name']?.toString(),
+          state: r['admin1']?.toString(),
+        );
       }
     } catch (_) {}
     return null;
+  }
+
+  /// Builds `"City, State"` when both are present and distinct.
+  static String? _composePlaceName({String? city, String? state}) {
+    final c = city?.trim();
+    final s = state?.trim();
+    if (c == null || c.isEmpty) {
+      if (s == null || s.isEmpty) return null;
+      return s;
+    }
+    if (s != null && s.isNotEmpty && s != c) return '$c, $s';
+    return c;
   }
 
   /// Forward place search for the map search bar (same Open-Meteo endpoint).

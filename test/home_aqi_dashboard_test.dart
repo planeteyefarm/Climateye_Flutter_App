@@ -80,14 +80,21 @@ void main() {
     expect(prediction, isTrue);
   });
 
-  testWidgets('location name chip shows place outside the gauge', (t) async {
+  testWidgets('location name chip shows floating place text without card',
+      (t) async {
     await t.pumpWidget(const MaterialApp(
       home: Scaffold(
         body: HomeLocationNameChip(name: 'Nashik, Maharashtra'),
       ),
     ));
     expect(find.text('Nashik, Maharashtra'), findsOneWidget);
-    expect(find.byIcon(Icons.place_outlined), findsOneWidget);
+    expect(find.text('Current location'), findsNothing);
+    expect(find.textContaining('Finding'), findsNothing);
+    expect(find.textContaining('Fetching'), findsNothing);
+    expect(find.byIcon(Icons.location_on_rounded), findsOneWidget);
+    // No glass card / pill container behind the label.
+    expect(find.byType(ClipRRect), findsNothing);
+    expect(find.byType(BackdropFilter), findsNothing);
   });
 
   testWidgets('phone viewport keeps six pollutants in one row', (t) async {
