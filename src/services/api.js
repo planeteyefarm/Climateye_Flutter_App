@@ -1,6 +1,22 @@
-import { ringCentroid } from '../utils/polygonIndex'
+import { pointInGeometry, ringCentroid } from '../utils/polygonIndex'
 
 const API_BASE_URL = import.meta.env.DEV ? '/api' : 'https://climateye-apis.up.railway.app/api'
+
+/** CAMS global methane is coarse (~0.4°). Sample AOI at ~0.2° for a smooth field. */
+const CAMS_METHANE_GRID_DEG = 0.2
+const CAMS_METHANE_MAX_SAMPLES = 25
+const CAMS_METHANE_CONCURRENCY = 4
+const CAMS_METHANE_PALETTE = [
+  '#000004',
+  '#1b0c41',
+  '#4a0c6b',
+  '#781c6d',
+  '#a52c60',
+  '#cf4446',
+  '#ed6925',
+  '#fb9b06',
+  '#fcffa4'
+]
 
 /**
  * Calculate the center point (centroid) of a polygon geometry
@@ -173,37 +189,15 @@ export const fetchHourlyWeatherData = async (latitude, longitude, date) => {
 
 /**
  * Hourly rain forecast via backend → Open-Meteo
- * https://api.open-meteo.com/v1/forecast?hourly=rain
- * Dev falls back to Vite /open-meteo proxy if the Railway route is not deployed yet.
  */
 export const fetchOpenMeteoRainForecast = async (latitude, longitude) => {
-  const body = JSON.stringify({ latitude, longitude })
-  try {
-    const response = await fetch(`${API_BASE_URL}/weather/rain-forecast`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body
-    })
-    if (response.ok) return response.json()
-  } catch (error) {
-    if (!import.meta.env.DEV) {
-      console.error('Error fetching rain forecast:', error)
-      throw error
-    }
-  }
-
-  if (!import.meta.env.DEV) {
-    throw new Error('Rain forecast API error')
-  }
-
-  const params = new URLSearchParams({
-    latitude: String(latitude),
-    longitude: String(longitude),
-    hourly: 'rain'
+  const response = await fetch(`${API_BASE_URL}/weather/rain-forecast`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ latitude, longitude })
   })
-  const response = await fetch(`/open-meteo/v1/forecast?${params}`)
   if (!response.ok) {
-    throw new Error(`Open-Meteo rain forecast error: ${response.statusText}`)
+    throw new Error(`Rain forecast API error: ${response.statusText}`)
   }
   return response.json()
 }
@@ -602,5 +596,186 @@ export const fetchMethanePlumes = async (query) => {
 export const fetchMethaneTiles = async (query) => {
   const response = await fetch(`${API_BASE_URL}/methane/tiles?${methaneQuery(query)}`)
   return readApiJson(response)
+}
+
+const geometryBBox = (geometry) => {
+  const ring = geometry?.coordinates?.[0]
+  if (!ring?.length) return null
+  let minLng = Infinity
+  let minLat = Infinity
+  let maxLng = -Infinity
+  let maxLat = -Infinity
+  ring.forEach(([lng, lat]) => {
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
+    minLng = Math.min(minLng, lng)
+    maxLng = Math.max(maxLng, lng)
+    minLat = Math.min(minLat, lat)
+    maxLat = Math.max(maxLat, lat)
+  })
+  if (!Number.isFinite(minLng)) return null
+  return { minLng, minLat, maxLng, maxLat }
+}
+
+/**
+ * Sample points inside the AOI for CAMS methane (one Open-Meteo call per point).
+ */
+export const sampleCamsMethanePoints = (geometry) => {
+  const bbox = geometryBBox(geometry)
+  if (!bbox) return []
+
+  const { minLng, minLat, maxLng, maxLat } = bbox
+  const points = []
+  const seen = new Set()
+
+  const push = (lat, lng) => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+    if (!pointInGeometry([lng, lat], geometry)) return
+    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`
+    if (seen.has(key)) return
+    seen.add(key)
+    points.push({ latitude: lat, longitude: lng })
+  }
+
+  const startLng = Math.floor(minLng / CAMS_METHANE_GRID_DEG) * CAMS_METHANE_GRID_DEG
+  const startLat = Math.floor(minLat / CAMS_METHANE_GRID_DEG) * CAMS_METHANE_GRID_DEG
+  for (let lat = startLat; lat <= maxLat + 1e-9; lat += CAMS_METHANE_GRID_DEG) {
+    for (let lng = startLng; lng <= maxLng + 1e-9; lng += CAMS_METHANE_GRID_DEG) {
+      push(lat + CAMS_METHANE_GRID_DEG / 2, lng + CAMS_METHANE_GRID_DEG / 2)
+      if (points.length >= CAMS_METHANE_MAX_SAMPLES) return points
+    }
+  }
+
+  if (!points.length) {
+    const centroid = ringCentroid(geometry)
+    if (centroid) push(centroid[1], centroid[0])
+    if (!points.length) push((minLat + maxLat) / 2, (minLng + maxLng) / 2)
+  }
+
+  return points
+}
+
+const mapPool = async (items, limit, worker) => {
+  const results = new Array(items.length)
+  let next = 0
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next
+      next += 1
+      results[i] = await worker(items[i], i)
+    }
+  })
+  await Promise.all(runners)
+  return results
+}
+
+export const fetchOpenMeteoMethanePoint = async (latitude, longitude, { pastDays = 2, forecastDays = 1 } = {}) => {
+  const response = await fetch(`${API_BASE_URL}/cams/methane`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      latitude,
+      longitude,
+      past_days: pastDays,
+      forecast_days: forecastDays
+    })
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(data.reason || data.error || `Methane request failed (${response.status})`)
+  }
+  return data
+}
+
+/**
+ * Live / hourly CAMS methane for every sample inside the drawn geometry.
+ */
+export const fetchOpenMeteoMethaneForGeometry = async (geometry) => {
+  const samples = sampleCamsMethanePoints(geometry)
+  if (!samples.length) {
+    throw new Error('Could not sample points inside the selected area')
+  }
+
+  const settled = await mapPool(samples, CAMS_METHANE_CONCURRENCY, async (pt) => {
+    try {
+      return await fetchOpenMeteoMethanePoint(pt.latitude, pt.longitude)
+    } catch (err) {
+      return { error: err.message, latitude: pt.latitude, longitude: pt.longitude }
+    }
+  })
+
+  const ok = settled.filter((r) => r && r.methane_ug_m3 != null)
+  const failed = settled.filter((r) => r?.error)
+
+  if (!ok.length) {
+    throw new Error(failed[0]?.error || 'Open-Meteo returned empty methane values for this area')
+  }
+
+  const features = ok.map((row, i) => ({
+    type: 'Feature',
+    id: `cams-ch4-${i}`,
+    geometry: {
+      type: 'Point',
+      coordinates: [row.longitude, row.latitude]
+    },
+    properties: {
+      source: 'open-meteo',
+      mode: 'cams-hourly',
+      methane_ug_m3: row.methane_ug_m3,
+      methane_enhancement_ppm_m: row.methane_ug_m3,
+      observed_at: row.observed_at,
+      elevation_m: row.elevation,
+      unit: row.unit || 'μg/m³',
+      confidence: 'model',
+      hourly: row.hourly || []
+    }
+  }))
+
+  const values = features.map((f) => f.properties.methane_ug_m3)
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const pad = Math.max(5, (max - min) * 0.2 || 20)
+  const centerHourly = ok[0]?.hourly || []
+
+  return {
+    mode: 'cams-hourly',
+    features,
+    count: features.length,
+    samplesRequested: samples.length,
+    failed: failed.length,
+    attribution: 'Open-Meteo · CAMS methane',
+    legend: {
+      title: 'Live methane',
+      unit: 'μg/m³',
+      min: Math.max(0, Math.floor(min - pad)),
+      max: Math.ceil(max + pad),
+      palette: CAMS_METHANE_PALETTE
+    },
+    hourly: centerHourly,
+    note:
+      features.length <= 1
+        ? 'CAMS ambient methane filled across your drawn area (hourly μg/m³). One model cell often covers the whole AOI.'
+        : `${features.length} CAMS samples fused into an area methane field (hourly μg/m³).`,
+    dateLabel: ok[0]?.observed_at
+      ? `Near ${String(ok[0].observed_at).replace('T', ' ')}`
+      : 'Hourly CAMS'
+  }
+}
+
+/**
+ * Public NASA EMIT methane plumes for a bbox (via ClimateEye → US GHG Center).
+ */
+export const fetchEmitMethanePlumes = async ({ bounds, startDate, endDate } = {}) => {
+  if (!bounds) {
+    throw new Error('Bounds are required for EMIT plume search')
+  }
+  const params = new URLSearchParams({ bbox: String(bounds) })
+  if (startDate) params.set('startDate', startDate)
+  if (endDate) params.set('endDate', endDate)
+  const response = await fetch(`${API_BASE_URL}/emit/plumes?${params}`)
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || data.message || `EMIT search failed (${response.status})`)
+  }
+  return data
 }
 
